@@ -68,13 +68,10 @@ export function proxy(request: NextRequest) {
   );
   let authenticated = cookieIdentity !== null;
   const authorization = isApiRequest ? request.headers.get("authorization") : null;
-  if (!authenticated && authorization && /^Basic\s/i.test(authorization)) {
-    // Multi-user mode deliberately authenticates browsers with signed cookies;
-    // Basic remains available only in legacy single-password mode.
+  if (!authenticated && config.mode === "legacy" && authorization && /^Basic\s/i.test(authorization)) {
     const retryAfterMs = getAuthRetryAfterMs();
     if (retryAfterMs > 0) return tooManyAttempts(retryAfterMs);
-    authenticated = config.mode === "legacy"
-      && isValidBasicAuthorization(authorization, config.password);
+    authenticated = isValidBasicAuthorization(authorization, config.password);
     if (!authenticated) recordAuthFailure();
   }
   if (request.nextUrl.pathname === "/login") {
