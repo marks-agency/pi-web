@@ -1,11 +1,15 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
+import {
+  createPiWebAgentSessionServices,
+  withPiWebAgentSessionRuntime,
+} from "./agent-session-services";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import {
   createProjectCommandBashExtension,
@@ -15,6 +19,8 @@ import {
 import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { notifySessionComplete } from "./web-push";
+import { attachSessionOwnerInfo, getSessionOwnerId, setSessionOwnerId } from "./session-owners";
+import { getWebAuthConfig } from "./web-auth";
 import { hasActiveSessionLivenessProvider } from "./session-liveness";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
@@ -116,6 +122,7 @@ type AgentSessionWrapperOptions = {
   chatOnly?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
   suppressCompletionNotifications?: boolean;
+  sharedModelRuntime?: boolean;
 };
 
 const IDLE_RESET_EVENT_TYPES = new Set([
@@ -161,6 +168,7 @@ const COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT = new Set([
 
 export interface RpcSessionStartOptions {
   toolNames?: string[];
+  ownerUserId?: string;
   initialModel?: { provider: string; modelId: string };
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
@@ -246,6 +254,7 @@ export class AgentSessionWrapper {
   private readonly chatOnly: boolean;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly suppressCompletionNotifications: boolean;
+  private readonly sharedModelRuntime: boolean;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
@@ -264,6 +273,7 @@ export class AgentSessionWrapper {
     this.chatOnly = options.chatOnly ?? false;
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
+    this.sharedModelRuntime = options.sharedModelRuntime ?? false;
   }
 
   get sessionId(): string {
@@ -558,7 +568,10 @@ export class AgentSessionWrapper {
     }
   }
 
-  async send(command: Record<string, unknown>): Promise<unknown> {
+  async send(
+    command: Record<string, unknown>,
+    requestContext: { actorUserId?: string } = {},
+  ): Promise<unknown> {
     const type = command.type as string;
     const allowedDuringReplacement = COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT.has(type);
     if (this.sessionReplacement && !allowedDuringReplacement) {
@@ -784,6 +797,7 @@ export class AgentSessionWrapper {
           }
 
           const newSessionId = forkedManager.getSessionId();
+          if (requestContext.actorUserId) setSessionOwnerId(newSessionId, requestContext.actorUserId);
           cacheSessionPath(newSessionId, newSessionFile);
           invalidateSessionListCache();
           await this.shutdownAfterSessionReplacement("fork");
@@ -808,6 +822,7 @@ export class AgentSessionWrapper {
         if (!forkedPath) throw new Error("Failed to create forked session");
 
         const newSessionId = SessionManager.open(forkedPath, sessionDir).getSessionId();
+        if (requestContext.actorUserId) setSessionOwnerId(newSessionId, requestContext.actorUserId);
         cacheSessionPath(newSessionId, forkedPath);
         invalidateSessionListCache();
         return { cancelled: false, newSessionId };
@@ -834,6 +849,7 @@ export class AgentSessionWrapper {
           if (!clonedPath || !existsSync(clonedPath)) throw new Error("Failed to clone current session branch");
 
           const newSessionId = SessionManager.open(clonedPath, sessionDir).getSessionId();
+          if (requestContext.actorUserId) setSessionOwnerId(newSessionId, requestContext.actorUserId);
           cacheSessionPath(newSessionId, clonedPath);
           invalidateSessionListCache();
           await this.shutdownAfterSessionReplacement("clone");
@@ -968,7 +984,7 @@ export class AgentSessionWrapper {
         this.extensionStatuses.clear();
         this.resetExtensionWidgetsForReload();
         this.syncProjectTrust();
-        await this.inner.reload();
+        await withPiWebAgentSessionRuntime(this.sharedModelRuntime, () => this.inner.reload());
         this.setActiveToolSelection(activeToolNames);
         if (typeof this.inner.bindExtensions !== "function") {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
@@ -1659,11 +1675,11 @@ export class AgentSessionWrapper {
         this.extensionStatuses.clear();
         this.resetExtensionWidgetsForReload();
         this.syncProjectTrust();
-        await this.inner.reload({
+        await withPiWebAgentSessionRuntime(this.sharedModelRuntime, () => this.inner.reload({
           beforeSessionStart: () => {
             this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
           },
-        });
+        }));
       },
     };
   }
@@ -1720,6 +1736,7 @@ const SUBAGENT_CONTROLLER = createSubagentController({
         : {}),
       chatOnly: options?.chatOnly,
       suppressCompletionNotifications: true,
+      sharedModelRuntime: options?.sharedModelRuntime,
     });
     registerRpcWrapper(wrapper);
   },
@@ -1845,6 +1862,7 @@ export async function setRpcSessionTools(
 
   const started = await startRpcSession(`__recreate__${randomUUID()}`, "", sessionCwd, {
     ...(toolNames !== undefined ? { toolNames } : {}),
+    ...(getSessionOwnerId(sessionId) ? { ownerUserId: getSessionOwnerId(sessionId) } : {}),
     ...(model ? { initialModel: { provider: model.provider, modelId: model.id } } : {}),
     allowInitialModelFallback: true,
     ...(currentThinkingLevel && THINKING_LEVEL_NAMES.has(currentThinkingLevel as ThinkingLevel)
@@ -1878,6 +1896,7 @@ function runtimeMessageActivityMs(entry: SessionMessageEntry): number | undefine
  */
 export function getRpcSessionInfos(options: { includeTransient?: boolean } = {}): SessionInfo[] {
   const sessions: SessionInfo[] = [];
+  const authConfig = getWebAuthConfig();
   for (const session of getRegistry().values()) {
     if (typeof session.isAlive !== "function" || !session.isAlive()) continue;
 
@@ -1907,7 +1926,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
       if (activityMs !== undefined) lastActivityMs = Math.max(lastActivityMs, activityMs);
     }
 
-    sessions.push({
+    sessions.push(attachSessionOwnerInfo({
       path: sessionFile ?? "",
       id: header?.id ?? session.sessionId,
       cwd: header?.cwd ?? session.cwd,
@@ -1927,7 +1946,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
         },
       } : {}),
       transient: !persisted,
-    });
+    }, authConfig));
   }
   return sessions;
 }
@@ -1980,7 +1999,7 @@ export async function startRpcSession(
   cwd: string | undefined,
   options: RpcSessionStartOptions = {},
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
-  const { initialModel, allowInitialModelFallback, thinkingLevel } = options;
+  const { initialModel, allowInitialModelFallback, thinkingLevel, ownerUserId } = options;
   const requestedToolNames = options.toolNames === undefined
     ? undefined
     : validateSessionToolSelection(options.toolNames);
@@ -2056,7 +2075,7 @@ export async function startRpcSession(
     const exactSystemPromptRef: { current?: () => string } = {};
     const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
     const usesExactSystemPrompt = chatOnly || subagentResources?.exactSystemPrompt !== undefined;
-    const services = await createAgentSessionServices({
+    const services = await createPiWebAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
       settingsManager,
@@ -2161,6 +2180,14 @@ export async function startRpcSession(
       suppressCompletionNotifications: Boolean(subagentResources),
     });
     const realSessionId = inner.sessionId as string;
+    if (!sessionFile && ownerUserId) {
+      try {
+        setSessionOwnerId(realSessionId, ownerUserId);
+      } catch (error) {
+        await wrapper.shutdown();
+        throw error;
+      }
+    }
     registerRpcWrapper(wrapper);
 
     return { session: wrapper, realSessionId };

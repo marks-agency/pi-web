@@ -21,6 +21,8 @@ const { getHelpText, parseLaunchOptions } = require("./pi-web-options");
 const { getNextNodeArgs } = require("./pi-web-node-args");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { wireChildProcessLifecycle } = require("./process-lifecycle");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { withSubagentPiPackageRoot } = require("./subagent-host-package");
 
 let launchOptions;
 try {
@@ -59,7 +61,7 @@ try {
 }
 
 const loopbackHostnames = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-const passwordEnabled = Boolean(process.env.PI_WEB_PASSWORD);
+const authenticationConfigured = Boolean(process.env.PI_WEB_PASSWORD || process.env.PI_WEB_USERS_FILE);
 
 if (!fs.existsSync(nextDir)) {
   console.error("Build artifacts not found. Please report this issue.");
@@ -67,9 +69,9 @@ if (!fs.existsSync(nextDir)) {
 }
 
 if (!loopbackHostnames.has(hostname)) {
-  if (passwordEnabled) {
+  if (authenticationConfigured) {
     console.warn(
-      `Warning: pi-web is listening on ${hostname} with password authentication over HTTP. Use HTTPS or a trusted VPN to protect the password in transit.`,
+      `Warning: pi-web is listening on ${hostname} with authentication over HTTP. Use HTTPS or a trusted VPN to protect credentials in transit.`,
     );
   } else {
     console.warn(
@@ -86,7 +88,10 @@ nextArgs.push("-H", hostname);
 const child = spawn(process.execPath, getNextNodeArgs(nextBin, nextArgs), {
   cwd: pkgDir,
   stdio: ["inherit", "pipe", "inherit"],
-  env: { ...process.env, PI_WEB_HOSTNAME: hostname },
+  env: withSubagentPiPackageRoot(
+    { ...process.env, PI_WEB_HOSTNAME: hostname },
+    pkgDir,
+  ),
 });
 wireChildProcessLifecycle(child);
 

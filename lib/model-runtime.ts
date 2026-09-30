@@ -1,8 +1,5 @@
-import {
-  createAgentSessionServices,
-  getAgentDir,
-  type ModelRuntime,
-} from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createPiWebAgentSessionServices } from "./agent-session-services";
 
 /**
  * ModelRuntime that also includes providers registered by extensions (an
@@ -17,6 +14,6 @@ import {
  */
 export async function createModelRuntimeWithExtensions(): Promise<ModelRuntime> {
   const agentDir = getAgentDir();
-  const services = await createAgentSessionServices({ cwd: agentDir, agentDir });
+  const services = await createPiWebAgentSessionServices({ cwd: agentDir, agentDir });
   return services.modelRuntime;
 }

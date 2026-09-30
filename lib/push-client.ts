@@ -1,8 +1,7 @@
 /**
- * Client-side Web Push subscription. Called once when the Notification
- * permission is granted; silently no-ops on unsupported browsers (e.g. iOS
- * Safari < 16.4 or non-PWA contexts) so the existing in-page notification
- * path keeps working as a fallback.
+ * Client-side Web Push subscription. Called when an authenticated app session
+ * loads and Notification permission is granted, so the endpoint is bound to
+ * the current user. Unsupported browsers keep using in-page notifications.
  */
 
 let activeSubscriptionPromise: Promise<boolean> | null = null;
@@ -24,6 +23,28 @@ export function isPushSupported(): boolean {
     && "serviceWorker" in navigator
     && "PushManager" in window
     && "Notification" in window;
+}
+
+export async function clearPushSubscriptionForCurrentUser(): Promise<void> {
+  activeSubscriptionPromise = null;
+  if (!isPushSupported()) return;
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    const subscription = await registration?.pushManager.getSubscription();
+    if (!subscription) return;
+    try {
+      await fetch("/api/push/subscribe", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ endpoint: subscription.endpoint }),
+        keepalive: true,
+      });
+    } finally {
+      await subscription.unsubscribe();
+    }
+  } catch {
+    // Local unsubscribe still prevents delivery if the server could not unlink.
+  }
 }
 
 export async function setupPushSubscription(locale: string): Promise<boolean> {

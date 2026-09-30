@@ -26,7 +26,7 @@ import {
   setThinkingExpandedByDefault,
 } from "@/lib/thinking-expansion-preference";
 import { ModelsConfig } from "./ModelsConfig";
-import { setupPushSubscription } from "@/lib/push-client";
+import { clearPushSubscriptionForCurrentUser, setupPushSubscription } from "@/lib/push-client";
 import { SkillsConfig } from "./SkillsConfig";
 import { AgentsConfig } from "./AgentsConfig";
 import { PluginsConfig } from "./PluginsConfig";
@@ -90,6 +90,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
     setLoggingOut(true);
     setLogoutError("");
     try {
+      await clearPushSubscriptionForCurrentUser();
       const response = await fetch("/api/web-auth", { method: "DELETE" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       window.location.replace("/login");

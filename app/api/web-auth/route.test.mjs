@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test, { after, before, beforeEach } from "node:test";
 import { createJiti } from "jiti";
 import { NextRequest } from "next/server.js";
 
 const originalPassword = process.env.PI_WEB_PASSWORD;
+const originalUsersFile = process.env.PI_WEB_USERS_FILE;
 const jiti = createJiti(import.meta.url, {
   alias: { "@": process.cwd() },
   interopDefault: true,
   moduleCache: false,
 });
 const { GET, POST, DELETE } = await jiti.import("./route.ts");
+const { createWebUserRecord, createWebUsersFile } = await jiti.import("../../../lib/web-auth.ts");
 const { recordAuthSuccess } = await import("../../../lib/auth-throttle.ts");
 
 before(() => { process.env.PI_WEB_PASSWORD = "correct horse battery staple"; });
@@ -18,6 +23,8 @@ after(() => {
   recordAuthSuccess();
   if (originalPassword === undefined) delete process.env.PI_WEB_PASSWORD;
   else process.env.PI_WEB_PASSWORD = originalPassword;
+  if (originalUsersFile === undefined) delete process.env.PI_WEB_USERS_FILE;
+  else process.env.PI_WEB_USERS_FILE = originalUsersFile;
 });
 
 function request(method, body, headers = {}) {
@@ -51,7 +58,62 @@ test("logs in with one password and reports the signed session", async () => {
 
   const cookiePair = cookie.split(";", 1)[0];
   response = await GET(request("GET", undefined, { Cookie: cookiePair }));
-  assert.deepEqual(await response.json(), { enabled: true, authenticated: true });
+  assert.deepEqual(await response.json(), { enabled: true, mode: "legacy", authenticated: true, user: { id: "legacy", username: "pi", displayName: "Pi" } });
+});
+
+test("logs in as a local user and returns its identity from the signed session", async () => {
+  const passwordBefore = process.env.PI_WEB_PASSWORD;
+  const usersFileBefore = process.env.PI_WEB_USERS_FILE;
+  const directory = mkdtempSync(join(tmpdir(), "pi-web-users-"));
+  const path = join(directory, "users.json");
+  const user = createWebUserRecord({ id: "user-123", username: "alice", displayName: "Alice", password: "correct horse" });
+  const users = createWebUsersFile([user]);
+  writeFileSync(path, JSON.stringify(users), { mode: 0o600 });
+  chmodSync(path, 0o600);
+  delete process.env.PI_WEB_PASSWORD;
+  process.env.PI_WEB_USERS_FILE = path;
+  try {
+    const response = await POST(request("POST", { username: "Alice", password: "correct horse" }));
+    assert.equal(response.status, 200);
+    const cookie = response.headers.get("set-cookie");
+    assert.match(cookie, /^pi_web_session=v2\./);
+    const status = await GET(request("GET", undefined, { Cookie: cookie.split(";", 1)[0] }));
+    assert.deepEqual(await status.json(), {
+      enabled: true,
+      mode: "users",
+      authenticated: true,
+      user: { id: "user-123", username: "alice", displayName: "Alice" },
+      users: [{ id: "user-123", username: "alice", displayName: "Alice" }],
+    });
+
+    const legacyToken = `pi_web_session=v1.invalid`;
+    const rejected = await GET(request("GET", undefined, { Cookie: legacyToken }));
+    assert.equal((await rejected.json()).authenticated, false);
+  } finally {
+    if (passwordBefore === undefined) delete process.env.PI_WEB_PASSWORD;
+    else process.env.PI_WEB_PASSWORD = passwordBefore;
+    if (usersFileBefore === undefined) delete process.env.PI_WEB_USERS_FILE;
+    else process.env.PI_WEB_USERS_FILE = usersFileBefore;
+    rmSync(directory, { recursive: true, force: true });
+    recordAuthSuccess();
+  }
+});
+
+test("fails closed when the configured local users file is missing", async () => {
+  const originalPath = process.env.PI_WEB_USERS_FILE;
+  const passwordBefore = process.env.PI_WEB_PASSWORD;
+  delete process.env.PI_WEB_PASSWORD;
+  process.env.PI_WEB_USERS_FILE = join(tmpdir(), `missing-pi-web-users-${Date.now()}.json`);
+  try {
+    const response = await GET(request("GET"));
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error, "Pi Web authentication is misconfigured");
+  } finally {
+    if (originalPath === undefined) delete process.env.PI_WEB_USERS_FILE;
+    else process.env.PI_WEB_USERS_FILE = originalPath;
+    if (passwordBefore === undefined) delete process.env.PI_WEB_PASSWORD;
+    else process.env.PI_WEB_PASSWORD = passwordBefore;
+  }
 });
 
 test("blocks further attempts after a failure, even with the right password", async () => {

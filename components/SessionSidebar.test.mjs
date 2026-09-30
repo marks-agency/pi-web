@@ -33,6 +33,14 @@ test("session windows stay valid after a project shrinks and before the viewport
   assert.equal(getSessionListIndices(2000, 0, 0).length, 28);
 });
 
+test("shows session owners and lets any authenticated team member reassign them", () => {
+  assert.match(source, /fetch\("\/api\/web-auth"/);
+  assert.match(source, /ownerUsers\.length > 0/);
+  assert.match(sessionItemSource, /session\.ownerName \?\? t\("session\.unassigned"\)/);
+  assert.match(sessionItemSource, /body: JSON\.stringify\(\{ ownerId: event\.currentTarget\.value \|\| null \}\)/);
+  assert.match(sessionItemSource, /ownerUsers\.map\(\(user\) => <option key=\{user\.id\} value=\{user\.id\}>\{user\.displayName\}<\/option>\)/);
+});
+
 test("only Shift+click bypasses session deletion confirmation", () => {
   assert.match(
     sessionItemSource,

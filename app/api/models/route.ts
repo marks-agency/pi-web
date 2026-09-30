@@ -1,7 +1,8 @@
 import { stat } from "fs/promises";
 import { resolve } from "path";
-import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { createPiWebAgentSessionServices } from "@/lib/agent-session-services";
 import {
   loadModelsWithCache,
   withModelRuntimeError,
@@ -37,7 +38,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   // runs a repository's .pi/extensions factories, so honor project trust here
   // too (see lib/project-trust.ts, #236).
   const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
-  const services = await createAgentSessionServices({
+  const services = await createPiWebAgentSessionServices({
     cwd,
     agentDir,
     ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),

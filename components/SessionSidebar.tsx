@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
+import type { WebUserSummary } from "@/lib/api-types";
 import { listSessionFamilies } from "@/lib/session-family";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
@@ -398,6 +399,17 @@ function PiWebTitle() {
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  const [ownerUsers, setOwnerUsers] = useState<WebUserSummary[]>([]);
+  useEffect(() => {
+    let active = true;
+    void fetch("/api/web-auth", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() as Promise<{ mode?: string; users?: WebUserSummary[] }> : null)
+      .then((data) => {
+        if (active) setOwnerUsers(data?.mode === "users" ? data.users ?? [] : []);
+      })
+      .catch(() => { if (active) setOwnerUsers([]); });
+    return () => { active = false; };
+  }, []);
   // Tracked in a ref only: the version is compared against the polled value to
   // decide whether the list needs reloading, and no render reads it.
   const sessionListVersionRef = useRef<number | null>(null);
@@ -1892,6 +1904,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 >
                   <SessionItem
                     session={displaySession}
+                    ownerUsers={ownerUsers}
                     isSelected={familySessions.some((session) => session.id === selectedSessionId)}
                     isRunning={familySessions.some((session) => runningSessionIds.has(session.id))}
                     isUnread={familySessions.some((session) => unreadSessionIds.has(session.id))}
@@ -2207,6 +2220,7 @@ function showProjectActivity(
 
 function SessionItem({
   session,
+  ownerUsers,
   isSelected,
   isRunning,
   isUnread,
@@ -2219,6 +2233,7 @@ function SessionItem({
   onToggleCollapse,
 }: {
   session: SessionInfo;
+  ownerUsers: WebUserSummary[];
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
@@ -2236,6 +2251,8 @@ function SessionItem({
   const [renameValue, setRenameValue] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [ownerSaving, setOwnerSaving] = useState(false);
+  const [ownerError, setOwnerError] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Select the whole name once the rename input is mounted (startRename's
@@ -2259,6 +2276,25 @@ function SessionItem({
     setRenameValue(session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12));
     setRenaming(true);
   }, [session.name, session.transient, displayFirstMessage, session.id]);
+
+  const changeOwner = useCallback(async (event: React.ChangeEvent<HTMLSelectElement>) => {
+    event.stopPropagation();
+    setOwnerSaving(true);
+    setOwnerError(false);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownerId: event.currentTarget.value || null }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      onRenamed?.();
+    } catch {
+      setOwnerError(true);
+    } finally {
+      setOwnerSaving(false);
+    }
+  }, [onRenamed, session.id]);
 
   const commitRename = useCallback(async () => {
     const name = renameValue.trim();
@@ -2456,6 +2492,11 @@ function SessionItem({
               <span>
                 {session.detailsPending ? "…" : t("sidebar.messagesCount", { count: session.messageCount })}
               </span>
+              {ownerUsers.length > 0 && (
+                <span title={t("session.owner")} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {session.ownerName ?? t("session.unassigned")}
+                </span>
+              )}
               {session.isWorktree && session.branch && (
                 <span
                   title={`Worktree: ${session.cwd}`}
@@ -2496,6 +2537,28 @@ function SessionItem({
           {/* Action buttons — shown on hover */}
           {hovered && !session.transient && (
             <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+              {ownerUsers.length > 0 && (
+                <select
+                  value={session.ownerId ?? ""}
+                  aria-label={t("session.assignOwner")}
+                  title={ownerError ? t("session.ownerUpdateFailed") : t("session.assignOwner")}
+                  disabled={ownerSaving}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => void changeOwner(event)}
+                  style={{
+                    maxWidth: 96, height: 30, padding: "0 4px", flexShrink: 1,
+                    border: "1px solid var(--border)", borderRadius: 6,
+                    background: "var(--bg)", color: ownerError ? "#ef4444" : "var(--text-muted)",
+                    fontSize: 10, cursor: ownerSaving ? "wait" : "pointer",
+                  }}
+                >
+                  <option value="">{t("session.unassigned")}</option>
+                  {session.ownerId && !ownerUsers.some((user) => user.id === session.ownerId) && (
+                    <option value={session.ownerId}>{session.ownerName ?? t("session.formerMember")}</option>
+                  )}
+                  {ownerUsers.map((user) => <option key={user.id} value={user.id}>{user.displayName}</option>)}
+                </select>
+              )}
               <button
                 onClick={startRename}
                 title={t("sidebar.rename")}

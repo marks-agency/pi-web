@@ -7,13 +7,15 @@ import {
 } from "@/lib/auth-throttle";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import {
+  createUserWebSessionToken,
   createWebSessionToken,
-  isValidBasicAuthorization,
+  findWebUserByUsername,
+  getWebAuthConfig,
+  getWebRequestIdentity,
   isValidWebPassword,
-  isValidWebSessionToken,
-  isWebPasswordEnabled,
   PI_WEB_SESSION_COOKIE,
   PI_WEB_SESSION_MAX_AGE,
+  verifyWebUserPassword,
 } from "@/lib/web-auth";
 
 export const dynamic = "force-dynamic";
@@ -48,20 +50,38 @@ function clearSessionCookie(response: NextResponse, request: Request): void {
   });
 }
 
+function unavailableAuthConfig(): NextResponse {
+  return NextResponse.json(
+    { error: "Pi Web authentication is misconfigured" },
+    { status: 503, headers: { "Cache-Control": "no-store" } },
+  );
+}
+
 export async function GET(request: NextRequest) {
   if (!isApiRequestAllowed(request)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }
 
-  const password = process.env.PI_WEB_PASSWORD;
-  const enabled = isWebPasswordEnabled(password);
-  const authenticated = !enabled
-    || isValidBasicAuthorization(request.headers.get("authorization"), password)
-    || isValidWebSessionToken(request.cookies.get(PI_WEB_SESSION_COOKIE)?.value, password);
-  return NextResponse.json(
-    { enabled, authenticated },
-    { headers: { "Cache-Control": "no-store" } },
-  );
+  try {
+    const config = getWebAuthConfig();
+    const identity = getWebRequestIdentity(request, config);
+    const authenticated = config.mode === "none" || identity !== null;
+    return NextResponse.json(
+      {
+        enabled: config.mode !== "none",
+        mode: config.mode,
+        authenticated,
+        ...(identity ? { user: { id: identity.id, username: identity.username, displayName: identity.displayName } } : {}),
+        ...(config.mode === "users" && identity
+          ? { users: config.data.users.map(({ id, username, displayName }) => ({ id, username, displayName })) }
+          : {}),
+      },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  } catch (error) {
+    console.error("[pi-web] invalid authentication configuration:", error instanceof Error ? error.message : error);
+    return unavailableAuthConfig();
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -72,22 +92,41 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
   }
 
-  const password = process.env.PI_WEB_PASSWORD;
-  if (!isWebPasswordEnabled(password)) {
+  let config: ReturnType<typeof getWebAuthConfig>;
+  try {
+    config = getWebAuthConfig();
+  } catch (error) {
+    console.error("[pi-web] invalid authentication configuration:", error instanceof Error ? error.message : error);
+    return unavailableAuthConfig();
+  }
+  if (config.mode === "none") {
     return NextResponse.json({ error: "Password authentication is disabled" }, { status: 404 });
   }
 
   const retryAfterMs = getAuthRetryAfterMs();
-  if (retryAfterMs > 0) {
-    return tooManyAttempts(retryAfterMs);
+  if (retryAfterMs > 0) return tooManyAttempts(retryAfterMs);
+
+  const body = await request.json().catch(() => null) as {
+    username?: unknown;
+    password?: unknown;
+  } | null;
+  let sessionToken: string | undefined;
+  if (config.mode === "legacy") {
+    if (body && typeof body.password === "string" && isValidWebPassword(body.password, config.password)) {
+      sessionToken = createWebSessionToken(config.password);
+    }
+  } else if (body && typeof body.username === "string" && typeof body.password === "string") {
+    const user = findWebUserByUsername(config, body.username);
+    if (verifyWebUserPassword(user, body.password) && user) {
+      sessionToken = createUserWebSessionToken(user, config.data.sessionSecret);
+    }
   }
 
-  const body = await request.json().catch(() => null) as { password?: unknown } | null;
-  if (!body || typeof body.password !== "string" || !isValidWebPassword(body.password, password)) {
+  if (!sessionToken) {
     const delayMs = recordAuthFailure();
-    console.warn(`[web-auth] Password authentication failed; next attempt blocked for ${delayMs}ms`);
+    console.warn(`[web-auth] Authentication failed; next attempt blocked for ${delayMs}ms`);
     return NextResponse.json(
-      { error: "Invalid password", retryAfterMs: delayMs },
+      { error: config.mode === "legacy" ? "Invalid password" : "Invalid credentials", retryAfterMs: delayMs },
       { status: 401, headers: { "Retry-After": String(retryAfterSeconds(delayMs)) } },
     );
   }
@@ -96,7 +135,7 @@ export async function POST(request: NextRequest) {
   const response = NextResponse.json({ ok: true });
   response.cookies.set({
     name: PI_WEB_SESSION_COOKIE,
-    value: createWebSessionToken(password),
+    value: sessionToken,
     httpOnly: true,
     sameSite: "lax",
     secure: isSecureRequest(request),

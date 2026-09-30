@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -18,6 +18,7 @@ const jiti = createJiti(import.meta.url, {
 const { DELETE: deleteSession, GET: getSessionDetail, PATCH: renameSession } = await jiti.import("./[id]/route.ts");
 const { GET: getSessionList } = await jiti.import("./route.ts");
 const { GET: getRunningSessions } = await jiti.import("../agent/running/route.ts");
+const { createUserWebSessionToken, createWebUserRecord, createWebUsersFile } = await jiti.import("../../../lib/web-auth.ts");
 const { GET: getSessionState } = await jiti.import("./[id]/state/route.ts");
 const {
   cacheSessionPath,
@@ -74,6 +75,62 @@ test("list versions expose idle session creation, rename and deletion to other w
   assert.ok(deleted.sessionListVersion > updated.sessionListVersion);
   assert.deepEqual(deleted.sessions, []);
   assert.equal((await (await getRunningSessions()).json()).sessionListVersion, deleted.sessionListVersion);
+});
+
+test("assigns a session owner through authenticated identity and exposes it in session APIs", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-web-session-owner-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousUsersFile = process.env.PI_WEB_USERS_FILE;
+  const previousPassword = process.env.PI_WEB_PASSWORD;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  process.env.PI_WEB_USERS_FILE = join(dir, "web-users.json");
+  delete process.env.PI_WEB_PASSWORD;
+  const user = createWebUserRecord({ id: "alice-id", username: "alice", displayName: "Alice", password: "a sufficiently long password" });
+  const users = createWebUsersFile([user]);
+  await writeFile(process.env.PI_WEB_USERS_FILE, JSON.stringify(users), { mode: 0o600 });
+  await chmod(process.env.PI_WEB_USERS_FILE, 0o600);
+  invalidateSessionListCache();
+  let sessionId;
+  t.after(async () => {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousUsersFile === undefined) delete process.env.PI_WEB_USERS_FILE;
+    else process.env.PI_WEB_USERS_FILE = previousUsersFile;
+    if (previousPassword === undefined) delete process.env.PI_WEB_PASSWORD;
+    else process.env.PI_WEB_PASSWORD = previousPassword;
+    if (sessionId) invalidateSessionPathCache(sessionId);
+    invalidateSessionListCache();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const manager = SessionManager.create(dir);
+  manager.appendMessage({ role: "user", content: "Owned session fixture", timestamp: Date.now() });
+  manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "done" }], timestamp: Date.now() });
+  sessionId = manager.getSessionId();
+  const token = createUserWebSessionToken(user, users.sessionSecret);
+  const cookie = `pi_web_session=${token}`;
+  const url = `http://localhost/api/sessions/${sessionId}`;
+  const response = await renameSession(new Request(url, {
+    method: "PATCH",
+    headers: { Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ ownerId: user.id }),
+  }), { params: Promise.resolve({ id: sessionId }) });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, ownerId: user.id, ownerName: "Alice" });
+
+  const detail = await getSessionDetail(new Request(url, { headers: { Cookie: cookie } }), { params: Promise.resolve({ id: sessionId }) });
+  assert.equal(detail.status, 200);
+  assert.equal((await detail.json()).info.ownerId, user.id);
+  invalidateSessionListCache();
+  const list = await (await getSessionList(new Request("http://localhost/api/sessions", { headers: { Cookie: cookie } }))).json();
+  assert.equal(list.sessions.find((session) => session.id === sessionId).ownerName, "Alice");
+
+  const forged = await renameSession(new Request(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ownerId: "someone-else" }),
+  }), { params: Promise.resolve({ id: sessionId }) });
+  assert.equal(forged.status, 409);
 });
 
 test("session listing returns a gzip-compressed response when the client accepts it", async (t) => {

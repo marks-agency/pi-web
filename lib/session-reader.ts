@@ -14,6 +14,8 @@ import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-res
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
 import { listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
+import { attachSessionOwnerInfo } from "./session-owners";
+import { getWebAuthConfig } from "./web-auth";
 
 export { getAgentDir };
 
@@ -206,11 +208,12 @@ function resolveScannedSessionRelation(
 function mapScannedSession(
   scanned: ScannedSessionInfo,
   pathToId: Map<string, string>,
+  authConfig: ReturnType<typeof getWebAuthConfig>,
 ): SessionInfo {
   cacheSessionPath(scanned.id, scanned.path);
   const { originSessionId, subagent } = resolveScannedSessionRelation(scanned, pathToId);
   const detailsPending = scanned.detailsPending === true;
-  return {
+  return attachSessionOwnerInfo({
     path: scanned.path,
     id: scanned.id,
     cwd: scanned.cwd,
@@ -231,13 +234,14 @@ function mapScannedSession(
         : {}),
     transient: false,
     ...(detailsPending ? { detailsPending: true } : {}),
-  };
+  }, authConfig);
 }
 
 async function buildSessionList(scanned: ScannedSessionInfo[]): Promise<SessionInfo[]> {
   const pathToId = new Map<string, string>();
   for (const session of scanned) pathToId.set(sessionPathKey(session.path), session.id);
-  return attachSessionProjectInfo(scanned.map((session) => mapScannedSession(session, pathToId)));
+  const authConfig = getWebAuthConfig();
+  return attachSessionProjectInfo(scanned.map((session) => mapScannedSession(session, pathToId, authConfig)));
 }
 
 async function loadAllSessions(): Promise<SessionInfo[]> {

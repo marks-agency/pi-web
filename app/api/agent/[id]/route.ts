@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession, setRpcSessionTools } from "@/lib/rpc-manager";
+import { getWebRequestIdentity } from "@/lib/web-auth";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -12,6 +13,7 @@ export async function POST(
   let promptAccepted = false;
 
   try {
+    const actor = getWebRequestIdentity(req);
     const body = await req.json() as { type: string; [key: string]: unknown };
     commandType = typeof body.type === "string" ? body.type : undefined;
     const requestedToolNames = body.toolNames;
@@ -37,7 +39,7 @@ export async function POST(
       });
     }
     if (existing?.isAlive()) {
-      const result = await existing.send(body);
+      const result = await existing.send(body, actor ? { actorUserId: actor.id } : {});
       promptAccepted = body.type === "prompt";
       return NextResponse.json({ success: true, data: result });
     }
@@ -55,7 +57,7 @@ export async function POST(
     const { session } = await startRpcSession(id, filePath, undefined, {
       ...(toolNames !== undefined ? { toolNames } : {}),
     });
-    const result = await session.send(body);
+    const result = await session.send(body, actor ? { actorUserId: actor.id } : {});
     promptAccepted = body.type === "prompt";
 
     return NextResponse.json({ success: true, data: result });

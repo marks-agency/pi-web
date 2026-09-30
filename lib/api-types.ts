@@ -91,6 +91,20 @@ export interface PushConfigResponse {
   publicKey: string;
 }
 
+export interface WebUserSummary {
+  id: string;
+  username: string;
+  displayName: string;
+}
+
+export interface WebAuthStatusResponse {
+  enabled: boolean;
+  mode: "none" | "legacy" | "users";
+  authenticated: boolean;
+  user?: WebUserSummary;
+  users?: WebUserSummary[];
+}
+
 export type PluginScope = "global" | "project";
 export type PluginResourceKind = "extension" | "skill" | "prompt" | "theme";
 

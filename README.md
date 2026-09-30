@@ -50,7 +50,8 @@ For port and hostname, command-line options override the corresponding environme
 | `--no-open` or `PI_WEB_NO_OPEN=1` | Do not open a browser automatically | Browser opens |
 | `PI_WEB_SKIP_VERSION_CHECK=1` | Disable Pi Web update checks | Unset |
 | `PI_WEB_ALLOWED_HOSTS` | Additional exact proxy or custom hostnames, comma-separated | Unset |
-| `PI_WEB_PASSWORD` | Enable browser password login; API clients may use Basic Auth with username `pi` | Authentication disabled |
+| `PI_WEB_PASSWORD` | Enable legacy single-password login; API clients may use Basic Auth with username `pi` | Authentication disabled |
+| `PI_WEB_USERS_FILE` | Absolute path to a private local-users JSON file; mutually exclusive with `PI_WEB_PASSWORD` | Unset |
 | `PI_WEB_IDLE_TIMEOUT_MS` | Session idle timeout in milliseconds, up to `2147483647`; `0` disables idle shutdown; invalid or out-of-range values use the default | `600000` (10 min) |
 
 For example:
@@ -62,13 +63,27 @@ pi-web -p 8080 -H 0.0.0.0 --no-open
 
 ### Remote Access
 
-Binding to a non-loopback address exposes an agent that can execute high-privilege actions. On a trusted LAN, require a long random password:
+Binding to a non-loopback address exposes an agent that can execute high-privilege actions. For a single operator, require a long random password:
 
 ```bash
 PI_WEB_PASSWORD='a-long-random-password' pi-web --hostname 0.0.0.0
 ```
 
-Password authentication does not encrypt the connection. Do not expose Pi Web over plain HTTP to the internet; use HTTPS through a trusted reverse proxy or a trusted VPN. If a reverse proxy sends an external hostname, add that exact name to `PI_WEB_ALLOWED_HOSTS`. This allow-list does not change the address Pi Web binds to.
+For a trusted team, create local accounts and start Pi Web in multi-user mode:
+
+```bash
+export PI_WEB_USERS_FILE="$HOME/.pi/agent/web-users.json"
+pi-web-user add alice --name "Alice"
+pi-web-user add bob --name "Bob"
+unset PI_WEB_PASSWORD
+pi-web --hostname 0.0.0.0
+```
+
+The first `pi-web-user add` creates the accounts file and session-signing key; later calls add, rotate, or remove accounts. Passwords are prompted without terminal echo and stored as scrypt hashes. Keep the file private (`0600`); `PI_WEB_USERS_FILE` must be an absolute path and cannot be used together with `PI_WEB_PASSWORD`. Basic Auth remains available only in legacy single-password mode; local-user mode uses signed browser sessions.
+
+Team accounts are for attribution and notification routing, not isolation. Every member can read, continue, edit, and delete every session. Pi Web, its terminals, and agent shell tools also run as the same operating-system user, so members must be trusted with that host account and its credentials/settings. New sessions belong to their creator; historical sessions are unassigned until a member assigns an owner. In multi-user mode, completion pushes go only to the session owner; unassigned sessions and subscriptions not yet bound to a user do not receive them. The browser endpoint is associated with the signed-in account on app load and unlinked on logout. Legacy single-password and no-auth modes retain broadcast push behavior.
+
+Authentication does not encrypt the connection. Do not expose Pi Web over plain HTTP to the internet; use HTTPS through a trusted reverse proxy or a trusted VPN. If a reverse proxy sends an external hostname, add that exact name to `PI_WEB_ALLOWED_HOSTS`. This allow-list does not change the address Pi Web binds to.
 
 ### HTTP Proxy
 

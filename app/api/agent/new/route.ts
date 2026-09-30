@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { allowFileRoot } from "@/lib/file-access";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { startRpcSession } from "@/lib/rpc-manager";
+import { getWebRequestIdentity } from "@/lib/web-auth";
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -55,7 +56,9 @@ export async function POST(req: Request) {
     // that share a key onto one session. Date.now() (ms resolution) collides for
     // requests in the same millisecond, merging two new sessions into one.
     const tempKey = `__new__${randomUUID()}`;
+    const actor = getWebRequestIdentity(req);
     const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, {
+      ...(actor ? { ownerUserId: actor.id } : {}),
       ...(toolNames ? { toolNames } : {}),
       ...(provider && modelId ? { initialModel: { provider, modelId } } : {}),
       ...(explicitThinkingLevel ? { thinkingLevel: explicitThinkingLevel } : {}),

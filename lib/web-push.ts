@@ -6,11 +6,14 @@ import { writePrivateFileAtomicSync } from "./atomic-file";
 import { enLocale } from "./i18n/messages/en";
 import { zhCNLocale } from "./i18n/messages/zh-CN";
 import { getAgentDir } from "./session-reader";
+import { getSessionOwnerId as readSessionOwnerId } from "./session-owners";
+import { getWebAuthConfig } from "./web-auth";
 
 export interface PushSubscriptionRecord {
   endpoint: string;
   keys: { p256dh: string; auth: string };
   locale: string;
+  userId?: string;
 }
 
 interface PushStateFile {
@@ -28,11 +31,15 @@ interface WebPushEnvironment {
   saveState: (state: PushStateFile) => void;
   generateVapidKeys: () => PushStateFile["vapidKeys"];
   listSessionNames: () => Promise<Map<string, string>>;
+  getAuthMode?: () => "none" | "legacy" | "users";
+  getSessionOwnerId?: (sessionId: string) => string | undefined;
+  getConfiguredUserIds?: () => readonly string[];
 }
 
 export interface WebPushNotifier {
   getVapidPublicKey: () => string;
   addSubscription: (subscription: PushSubscriptionRecord) => void;
+  removeSubscription: (endpoint: string, userId?: string) => void;
   notifySessionComplete: (sessionId: string) => Promise<void>;
 }
 
@@ -100,6 +107,16 @@ function getDefaultEnvironment(): WebPushEnvironment {
       }
       return names;
     },
+    getAuthMode() {
+      return getWebAuthConfig().mode;
+    },
+    getSessionOwnerId(sessionId) {
+      return readSessionOwnerId(sessionId);
+    },
+    getConfiguredUserIds() {
+      const config = getWebAuthConfig();
+      return config.mode === "users" ? config.data.users.map((user) => user.id) : [];
+    },
   };
 }
 
@@ -144,8 +161,25 @@ export function createWebPushNotifier(environment: WebPushEnvironment): WebPushN
       ];
       saveState();
     },
+    removeSubscription(endpoint, userId) {
+      const next = state.subscriptions.filter((subscription) => (
+        subscription.endpoint !== endpoint
+        || (userId !== undefined && subscription.userId !== undefined && subscription.userId !== userId)
+      ));
+      if (next.length !== state.subscriptions.length) {
+        state.subscriptions = next;
+        saveState();
+      }
+    },
     async notifySessionComplete(sessionId) {
-      if (state.subscriptions.length === 0) return;
+      let recipients = state.subscriptions;
+      if ((environment.getAuthMode?.() ?? "none") === "users") {
+        const ownerId = environment.getSessionOwnerId?.(sessionId);
+        const configuredUserIds = new Set(environment.getConfiguredUserIds?.() ?? []);
+        if (!ownerId || !configuredUserIds.has(ownerId)) return;
+        recipients = state.subscriptions.filter((subscription) => subscription.userId === ownerId);
+      }
+      if (recipients.length === 0) return;
       const sessionName = (await environment.listSessionNames()).get(sessionId);
       const payloadFor = (locale: string) => ({
         title: sessionName ?? localeText(locale, "sessionComplete"),
@@ -155,7 +189,7 @@ export function createWebPushNotifier(environment: WebPushEnvironment): WebPushN
       });
 
       let pruned = false;
-      for (const subscription of [...state.subscriptions]) {
+      for (const subscription of [...recipients]) {
         try {
           await environment.send(
             subscription,
@@ -192,6 +226,10 @@ export function getVapidPublicKey(): Promise<string> {
 
 export function addSubscription(subscription: PushSubscriptionRecord): Promise<void> {
   return getNotifier().then((notifier) => notifier.addSubscription(subscription));
+}
+
+export function removeSubscription(endpoint: string, userId?: string): Promise<void> {
+  return getNotifier().then((notifier) => notifier.removeSubscription(endpoint, userId));
 }
 
 export async function notifySessionComplete(sessionId: string): Promise<void> {

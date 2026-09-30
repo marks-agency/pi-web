@@ -24,6 +24,8 @@ import { computeSessionRevision } from "@/lib/session-revision";
 import type { SessionEntry } from "@/lib/types";
 import { readSubagentRun, readSubagentSessionResources, SUBAGENT_META_TYPE } from "@/lib/subagents";
 import { readSessionToolSelection } from "@/lib/session-tool-selection";
+import { attachSessionOwnerInfo, deleteSessionOwners, setSessionOwnerId } from "@/lib/session-owners";
+import { getWebAuthConfig, getWebRequestIdentity } from "@/lib/web-auth";
 import { jsonResponse } from "@/lib/json-response";
 
 export async function GET(
@@ -73,18 +75,12 @@ export async function GET(
       deferThinking,
       deferToolResultImages,
       tail,
-      sessionId: id, // local: lazy URLs for historical tool-result images
+      sessionId: id,
     });
     perf?.span("context");
     const totalActiveMs = computeSessionTotalActiveMs(entries);
-    // Cumulative usage over ALL entries, including history compacted away —
-    // the same aggregation the SDK's getSessionStats() uses. Lets the client
-    // keep monotonic token/cost counters across compaction and page reloads.
     const stats = computeSessionStats(entries as unknown as SessionEntry[]);
     perf?.span("stats");
-    // Opaque freshness token for the session view cache. Derived from the
-    // disk fingerprint and the actual read source; null tells the client the
-    // snapshot is unstable and must not be cached as fresh.
     const latestEntry = entries[entries.length - 1] as { id?: string } | undefined;
     const snapshotRevision = computeSessionRevision({
       filePath,
@@ -108,7 +104,7 @@ export async function GET(
       : null;
     const toolNames = readSubagentSessionResources(entries as never)?.tools
       ?? readSessionToolSelection(entries as never);
-    const info = header ? (await attachSessionProjectInfo([{
+    const info = header ? attachSessionOwnerInfo((await attachSessionProjectInfo([{
       path: filePath,
       id: header.id,
       cwd: header.cwd ?? "",
@@ -129,7 +125,7 @@ export async function GET(
           ? { relation: { kind: "fork" as const, ...(parentSessionId ? { originSessionId: parentSessionId } : {}) } }
           : {}),
       transient: !filePath || !existsSync(filePath),
-    }]))[0] : null;
+    }]))[0]) : null;
 
     return perf?.attach(jsonResponse(
       req,
@@ -169,27 +165,58 @@ export async function GET(
   }
 }
 
-// PATCH /api/sessions/[id]  body: { name: string }
+// PATCH /api/sessions/[id] body: { name?: string; ownerId?: string | null }
 export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   try {
-    const { name } = await req.json() as { name?: string };
-    if (typeof name !== "string") {
-      return NextResponse.json({ error: "name is required" }, { status: 400 });
+    const body = await req.json() as { name?: unknown; ownerId?: unknown };
+    const hasName = Object.hasOwn(body, "name");
+    const hasOwner = Object.hasOwn(body, "ownerId");
+    if (!hasName && !hasOwner) {
+      return NextResponse.json({ error: "name or ownerId is required" }, { status: 400 });
     }
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    if (hasName && typeof body.name !== "string") {
+      return NextResponse.json({ error: "name must be a string" }, { status: 400 });
     }
 
-    // PATCH writes via appendSessionInfo — open fresh, bypassing the cache.
-    const sm = openSessionManager(filePath, { mutable: true });
-    sm.appendSessionInfo(name.trim());
-    invalidateSessionManagerCache(filePath);
-    invalidateSessionListCache();
+    if (hasOwner) {
+      const config = getWebAuthConfig();
+      const actor = getWebRequestIdentity(req, config);
+      if (config.mode !== "users" || !actor) {
+        return NextResponse.json({ error: "Session ownership requires an authenticated local user" }, { status: 409 });
+      }
+      if (body.ownerId !== null && (typeof body.ownerId !== "string" || !config.usersById.has(body.ownerId))) {
+        return NextResponse.json({ error: "ownerId must identify a configured Pi Web user or be null" }, { status: 400 });
+      }
+      const live = getRpcSession(id);
+      const filePath = live?.isAlive() ? live.sessionFile : await resolveSessionPath(id);
+      if (!live?.isAlive() && !filePath) {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+      setSessionOwnerId(id, body.ownerId as string | null);
+      invalidateSessionListCache();
+      if (!hasName) {
+        return NextResponse.json({
+          ok: true,
+          ownerId: body.ownerId,
+          ownerName: body.ownerId === null ? undefined : config.usersById.get(body.ownerId as string)?.displayName,
+        });
+      }
+    }
+
+    if (hasName) {
+      const filePath = await resolveSessionPath(id);
+      if (!filePath) {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+      const sm = openSessionManager(filePath, { mutable: true });
+      sm.appendSessionInfo((body.name as string).trim());
+      invalidateSessionManagerCache(filePath);
+      invalidateSessionListCache();
+    }
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
@@ -208,18 +235,15 @@ export async function DELETE(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    // Read only the bounded header before deleting.
     let parentSessionPath: string | undefined;
     try {
       parentSessionPath = readSessionHeader(filePath)?.parentSession;
     } catch (error) {
-      // Empty runtime sessions have a cached path before their first disk write.
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     let parentSessionId: string | undefined;
     if (parentSessionPath) {
       try {
-        // The parent may have been deleted or moved already; treat it as absent.
         parentSessionId = readSessionHeader(parentSessionPath)?.id;
       } catch {
         parentSessionId = undefined;
@@ -228,7 +252,6 @@ export async function DELETE(
 
     const targetPathKey = sessionPathKey(filePath);
     const dir = dirname(filePath);
-    // Deleting a session also deletes every persisted or live subagent below it.
     const sessions = mergeSessionLists(
       await listAllSessions({ force: true }),
       getRpcSessionInfos({ includeTransient: true }),
@@ -241,7 +264,6 @@ export async function DELETE(
       childrenByParent.set(session.relation.parentSessionId, children);
     }
     const sessionPaths = new Map(sessions.map((session) => [session.id, session.path]));
-    // Include local files even when the global catalogue is stale or incomplete.
     try {
       for (const file of readdirSync(dir).filter((name) => name.endsWith(".jsonl"))) {
         const childPath = join(dir, file);
@@ -259,9 +281,9 @@ export async function DELETE(
           children.push(header.id);
           childrenByParent.set(subagent.parentSessionId, children);
           sessionPaths.set(header.id, childPath);
-        } catch { /* skip malformed or concurrently removed sessions */ }
+        } catch { /* skip malformed or concurrently removed session */ }
       }
-    } catch { /* skip if dir unreadable */ }
+    } catch { /* skip if directory unreadable */ }
     const deletedSessionIds = new Set<string>([id]);
     const pending = [id];
     while (pending.length > 0) {
@@ -288,8 +310,6 @@ export async function DELETE(
     }
     const deletedPathKeys = new Set([...deletedPaths.values()].map((path) => sessionPathKey(path)));
 
-    // Re-attach all direct children to this session's parent (cascade re-parent)
-    // Scan sibling files in the same directory
     try {
       const files = readdirSync(dir).filter(
         (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey,
@@ -302,21 +322,16 @@ export async function DELETE(
           const lines = content.split("\n");
           const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
           if (
-            header.type === "session" &&
-            header.parentSession &&
-            sessionPathKey(header.parentSession) === targetPathKey
+            header.type === "session"
+            && header.parentSession
+            && sessionPathKey(header.parentSession) === targetPathKey
           ) {
-            // Rewrite header with new parentSession
             header.parentSession = parentSessionPath;
             lines[0] = JSON.stringify(header);
             if (parentSessionPath && parentSessionId) {
               for (let index = 1; index < lines.length; index += 1) {
                 let entry: { type?: string; customType?: string; data?: unknown };
-                try {
-                  entry = JSON.parse(lines[index]);
-                } catch {
-                  continue;
-                }
+                try { entry = JSON.parse(lines[index]); } catch { continue; }
                 if (
                   entry.type !== "custom"
                   || entry.customType !== SUBAGENT_META_TYPE
@@ -324,11 +339,7 @@ export async function DELETE(
                   || entry.data === null
                   || Array.isArray(entry.data)
                 ) continue;
-                entry.data = {
-                  ...entry.data,
-                  parentSessionId,
-                  parentSessionPath,
-                };
+                entry.data = { ...entry.data, parentSessionId, parentSessionPath };
                 lines[index] = JSON.stringify(entry);
                 break;
               }
@@ -337,7 +348,7 @@ export async function DELETE(
           }
         } catch { /* skip malformed */ }
       }
-    } catch { /* skip if dir unreadable */ }
+    } catch { /* skip if directory unreadable */ }
 
     for (const deletedId of [...deletedSessionIds].reverse()) {
       if (deletedId === id) continue;
@@ -355,6 +366,7 @@ export async function DELETE(
       invalidateSessionPathCache(deletedId);
       invalidateSessionManagerCache(deletedPath);
     }
+    deleteSessionOwners(deletedSessionIds);
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
   } catch (error) {

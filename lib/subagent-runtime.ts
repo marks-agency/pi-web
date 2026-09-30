@@ -1,7 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
   createAgentSessionFromServices,
-  createAgentSessionServices,
   getAgentDir,
   initTheme,
   SessionManager,
@@ -9,6 +8,7 @@ import {
   type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike } from "./pi-types";
+import { createPiWebAgentSessionServices } from "./agent-session-services";
 import {
   subagentNotificationText,
   subagentToolDetails,
@@ -54,7 +54,7 @@ export interface SubagentRuntimeDependencies {
   getSession(sessionId: string): HostSession | undefined;
   registerSession(
     inner: AgentSessionLike,
-    options?: { exactSystemPrompt?: string; chatOnly?: boolean },
+    options?: { exactSystemPrompt?: string; chatOnly?: boolean; sharedModelRuntime?: boolean },
   ): void;
   reopenSession(sessionId: string, sessionFile: string): Promise<HostSession>;
   resolveSessionPath(sessionId: string): Promise<string | null>;
@@ -239,7 +239,7 @@ export function createSubagentController(
       });
       const { chatOnly, appendSystemPrompt, delegatedTask } = promptPlan;
       if (!chatOnly) initTheme();
-      const services = await createAgentSessionServices({
+      const services = await createPiWebAgentSessionServices({
         cwd: childCwd,
         agentDir,
         modelRuntime: parentModelRuntime,
@@ -323,6 +323,7 @@ export function createSubagentController(
           ? { exactSystemPrompt: promptPlan.exactSystemPrompt }
           : {}),
         chatOnly,
+        sharedModelRuntime: true,
       });
 
       const initialRun: SubagentRunInfo = {

@@ -137,11 +137,15 @@ test("uses the compact controls glyph for General", () => {
   assert.match(panelSource, /section === "general"[\s\S]*?<path d="M20 7h-9M14 17H5" \/>[\s\S]*?<circle cx="7" cy="7" r="3" \/>[\s\S]*?<circle cx="17" cy="17" r="3" \/>/);
 });
 
-test("keeps password authentication to one login field and one settings action", () => {
+test("supports local usernames and keeps a single settings logout action", () => {
   assert.equal((loginSource.match(/type="password"/g) ?? []).length, 1);
-  assert.doesNotMatch(loginSource, /type="(?:text|email)"/);
+  assert.match(loginSource, /mode === "users" && \([\s\S]*?type="text"/);
+  assert.match(loginSource, /mode === "users" \? \{ username, password \} : \{ password \}/);
+  assert.match(loginSource, /await setupPushSubscription\(locale\)/);
+  assert.match(loginSource, /if \(!bound\) await clearPushSubscriptionForCurrentUser\(\)/);
   assert.match(loginSource, /autoComplete="current-password"/);
   assert.match(loginSource, /safeLoginDestination\(destination, window\.location\.origin\)/);
+  assert.match(panelSource, /clearPushSubscriptionForCurrentUser\(\)/);
   assert.match(panelSource, /fetch\("\/api\/web-auth", \{ method: "DELETE" \}\)/);
   assert.match(panelSource, /t\("auth\.logOut"\)/);
   assert.match(loginSource, /className="web-login-composer"[\s\S]*?type="password"[\s\S]*?<button type="submit"/);

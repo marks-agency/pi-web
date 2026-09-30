@@ -9,10 +9,11 @@ import {
   isApiRequestHostAllowed,
 } from "@/lib/request-security";
 import {
-  isValidWebSessionToken,
+  getWebAuthConfig,
+  getWebSessionIdentity,
   isValidBasicAuthorization,
-  isWebPasswordEnabled,
   PI_WEB_SESSION_COOKIE,
+  type WebAuthConfig,
 } from "@/lib/web-auth";
 
 function tooManyAttempts(retryAfterMs: number): NextResponse {
@@ -22,6 +23,13 @@ function tooManyAttempts(retryAfterMs: number): NextResponse {
       "Cache-Control": "no-store",
       "Retry-After": String(retryAfterSeconds(retryAfterMs)),
     },
+  });
+}
+
+function unavailableAuthConfig(): NextResponse {
+  return new NextResponse("Pi Web authentication is misconfigured", {
+    status: 503,
+    headers: { "Cache-Control": "no-store" },
   });
 }
 
@@ -39,26 +47,34 @@ export function proxy(request: NextRequest) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }
 
-  const password = process.env.PI_WEB_PASSWORD;
-  if (!isWebPasswordEnabled(password)) {
+  let config: WebAuthConfig;
+  try {
+    config = getWebAuthConfig();
+  } catch (error) {
+    console.error("[pi-web] invalid authentication configuration:", error instanceof Error ? error.message : error);
+    return unavailableAuthConfig();
+  }
+
+  if (config.mode === "none") {
     if (request.nextUrl.pathname === "/login") {
       return NextResponse.redirect(new URL("/", request.url));
     }
     return NextResponse.next();
   }
 
-  let authenticated = isValidWebSessionToken(request.cookies.get(PI_WEB_SESSION_COOKIE)?.value, password);
+  const cookieIdentity = getWebSessionIdentity(
+    request.cookies.get(PI_WEB_SESSION_COOKIE)?.value,
+    config,
+  );
+  let authenticated = cookieIdentity !== null;
   const authorization = isApiRequest ? request.headers.get("authorization") : null;
   if (!authenticated && authorization && /^Basic\s/i.test(authorization)) {
-    // Every Basic header is a password guess, so it shares the login form's
-    // throttle; otherwise any API path (or GET /api/web-auth) answers guesses
-    // at full speed. While blocked even the right password is refused, or the
-    // answer would leak. A success does not reset the counter: Basic clients
-    // authenticate on every request, and each reset would hand an interleaved
-    // guesser a fresh short block.
+    // Multi-user mode deliberately authenticates browsers with signed cookies;
+    // Basic remains available only in legacy single-password mode.
     const retryAfterMs = getAuthRetryAfterMs();
     if (retryAfterMs > 0) return tooManyAttempts(retryAfterMs);
-    authenticated = isValidBasicAuthorization(authorization, password);
+    authenticated = config.mode === "legacy"
+      && isValidBasicAuthorization(authorization, config.password);
     if (!authenticated) recordAuthFailure();
   }
   if (request.nextUrl.pathname === "/login") {
@@ -80,7 +96,9 @@ export function proxy(request: NextRequest) {
       status: 401,
       headers: {
         "Cache-Control": "no-store",
-        "WWW-Authenticate": 'Basic realm="Pi Web", charset="UTF-8"',
+        ...(config.mode === "legacy"
+          ? { "WWW-Authenticate": 'Basic realm="Pi Web", charset="UTF-8"' }
+          : {}),
       },
     });
   }
