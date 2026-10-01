@@ -24,10 +24,11 @@ test("uses a compact narrow-mobile toolbar with a floating action layer", () => 
   }
 });
 
-test("only renders the Agents switcher when the active session family has subagents", () => {
-  assert.match(source, /const hasSubagentSessions = Boolean\(activeSessionFamily\?\.subagents\.length\)/);
-  assert.match(source, /\{hasSubagentSessions && \(\s*<button[\s\S]*?toggleTopPanel\("agents", mobile\)/);
-  assert.match(source, /activeTopPanel === "agents" && activeSessionFamily && selectedSession/);
+test("keeps the Agents switcher available for selected sessions without child sessions", () => {
+  assert.match(source, /const activeAgentFamily = activeSessionFamily \?\? \(selectedSession \? \{ root: selectedSession, subagents: \[\] \} : null\)/);
+  assert.match(source, /const canOpenAgentsPanel = Boolean\(activeAgentFamily\)/);
+  assert.match(source, /\{canOpenAgentsPanel && \(\s*<button[\s\S]*?toggleTopPanel\("agents", mobile\)/);
+  assert.match(source, /activeTopPanel === "agents" && activeAgentFamily && selectedSession/);
 });
 
 test("keeps the Agents panel open while switching sessions and positions it at the left", () => {

@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { SessionInfo, SubagentSessionStatus } from "@/lib/types";
+import { PiSubagentsRuns } from "./PiSubagentsRuns";
 
 interface Props {
   rootSession: SessionInfo;
@@ -234,6 +235,7 @@ export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, r
             </div>
           )}
         </div>
+        <PiSubagentsRuns sessionId={rootSession.id} />
       </div>
     </div>
   );

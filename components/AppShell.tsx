@@ -144,7 +144,8 @@ export function AppShell() {
     () => getSessionFamily(sessionsWithSelection, selectedSession?.id),
     [selectedSession?.id, sessionsWithSelection],
   );
-  const hasSubagentSessions = Boolean(activeSessionFamily?.subagents.length);
+  const activeAgentFamily = activeSessionFamily ?? (selectedSession ? { root: selectedSession, subagents: [] } : null);
+  const canOpenAgentsPanel = Boolean(activeAgentFamily);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const handleRunningSessionIdsChange = useCallback((ids: Set<string>) => {
     setRunningSessionIds((previous) => {
@@ -337,10 +338,10 @@ export function AppShell() {
   }, [sessionHasBranches]);
 
   useEffect(() => {
-    if (!hasSubagentSessions) {
+    if (!canOpenAgentsPanel) {
       setActiveTopPanel((panel) => panel === "agents" ? null : panel);
     }
-  }, [hasSubagentSessions]);
+  }, [canOpenAgentsPanel]);
 
   useEffect(() => {
     if (rightPanelFullWidth) setActiveTopPanel(null);
@@ -1443,7 +1444,7 @@ export function AppShell() {
             </button>
           );
         })()}
-        {hasSubagentSessions && (
+        {canOpenAgentsPanel && (
           <button
             type="button"
             onClick={() => toggleTopPanel("agents", mobile)}
@@ -2068,10 +2069,10 @@ export function AppShell() {
               overflowY: "auto",
               zIndex: 500,
             }}>
-              {activeTopPanel === "agents" && activeSessionFamily && selectedSession && (
+              {activeTopPanel === "agents" && activeAgentFamily && selectedSession && (
                 <AgentSessionPanel
-                  rootSession={activeSessionFamily.root}
-                  subagents={activeSessionFamily.subagents}
+                  rootSession={activeAgentFamily.root}
+                  subagents={activeAgentFamily.subagents}
                   selectedSessionId={selectedSession.id}
                   runningSessionIds={runningSessionIds}
                   onSelectSession={handleSelectSession}

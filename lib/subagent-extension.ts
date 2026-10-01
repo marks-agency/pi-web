@@ -11,6 +11,11 @@ import {
   type SubagentRunInfo,
 } from "./subagents";
 import { MAX_SUBAGENT_INPUT_FILES } from "./subagent-input";
+import {
+  createPiSubagentsRpcRequest,
+  registerPiSubagentsBridge,
+  unregisterPiSubagentsBridge,
+} from "./pi-subagents-web-bridge";
 
 export const HOST_SUBAGENT_EXTENSION_NAME = "pi-web-subagents";
 const HOST_SUBAGENT_EXTENSION_PATH = `<inline:${HOST_SUBAGENT_EXTENSION_NAME}>`;
@@ -146,6 +151,23 @@ export function createSubagentExtension(
     name: HOST_SUBAGENT_EXTENSION_NAME,
     hidden: true,
     factory: (pi) => {
+      if (typeof pi.on === "function" && pi.events) {
+        let bridgeSessionId: string | undefined;
+        pi.on("session_start", (_event, ctx) => {
+          const sessionId = ctx.sessionManager.getSessionId();
+          if (!sessionId) return;
+          if (bridgeSessionId) unregisterPiSubagentsBridge(bridgeSessionId);
+          bridgeSessionId = sessionId;
+          const request = createPiSubagentsRpcRequest(pi.events);
+          registerPiSubagentsBridge(sessionId, request);
+          // The RPC bridge may be absent; the UI reports that as an unavailable extension.
+          void request("ping").catch(() => undefined);
+        });
+        pi.on("session_shutdown", () => {
+          if (bridgeSessionId) unregisterPiSubagentsBridge(bridgeSessionId);
+          bridgeSessionId = undefined;
+        });
+      }
       if (!isEnabled()) return;
       const profiles = getProfiles().filter((profile) => profile.enabled);
       const profileNames = profiles.map((profile) => profile.name);
