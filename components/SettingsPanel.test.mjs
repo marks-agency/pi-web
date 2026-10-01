@@ -137,16 +137,26 @@ test("uses the compact controls glyph for General", () => {
   assert.match(panelSource, /section === "general"[\s\S]*?<path d="M20 7h-9M14 17H5" \/>[\s\S]*?<circle cx="7" cy="7" r="3" \/>[\s\S]*?<circle cx="17" cy="17" r="3" \/>/);
 });
 
-test("supports local usernames and keeps a single settings logout action", () => {
+test("session-owner choices use profile summaries in selection mode", async () => {
+  const sidebarSource = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
+  assert.match(sidebarSource, /data\?\.mode === "selection"\) setOwnerUsers\(data\.profiles \?\? \[\]\)/);
+  assert.match(sidebarSource, /ownerUsers\.map\(\(user\) => <option key=\{user\.id\} value=\{user\.id\}>\{user\.displayName\}<\/option>\)/);
+});
+
+test("supports password login and selection-only profiles with a settings switch", () => {
   assert.equal((loginSource.match(/type="password"/g) ?? []).length, 1);
   assert.match(loginSource, /mode === "users" && \([\s\S]*?type="text"/);
-  assert.match(loginSource, /mode === "users" \? \{ username, password \} : \{ password \}/);
+  assert.match(loginSource, /mode === "selection"\s*\? \{ profileId \}/);
+  assert.match(loginSource, /id="web-login-profile"/);
+  assert.match(loginSource, /auth\.profileNotice/);
   assert.match(loginSource, /await setupPushSubscription\(locale\)/);
   assert.match(loginSource, /if \(!bound\) await clearPushSubscriptionForCurrentUser\(\)/);
   assert.match(loginSource, /autoComplete="current-password"/);
   assert.match(loginSource, /safeLoginDestination\(destination, window\.location\.origin\)/);
   assert.match(panelSource, /clearPushSubscriptionForCurrentUser\(\)/);
   assert.match(panelSource, /fetch\("\/api\/web-auth", \{ method: "DELETE" \}\)/);
+  assert.match(panelSource, /webAuthMode !== "none"/);
+  assert.match(panelSource, /webAuthMode === "selection" \? t\("auth\.switchProfile"\)/);
   assert.match(panelSource, /t\("auth\.logOut"\)/);
   assert.match(loginSource, /className="web-login-composer"[\s\S]*?type="password"[\s\S]*?<button type="submit"/);
   assert.match(globalCssSource, /\.web-login-composer \{[\s\S]*?display: flex;[\s\S]*?border-radius: 14px/);

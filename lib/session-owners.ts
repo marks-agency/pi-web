@@ -141,7 +141,7 @@ export function resolveSessionOwnerInfo(
   const ownerId = getSessionOwnerId(session.id, inheritedOwnerId);
   if (!ownerId) return {};
 
-  if (config.mode === "users") {
+  if (config.mode === "users" || config.mode === "selection") {
     const user = config.usersById.get(ownerId);
     return { ownerId, ownerName: user?.displayName ?? "Former team member" };
   }

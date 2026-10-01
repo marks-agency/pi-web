@@ -25,6 +25,7 @@ function identityForRequest(request: Request) {
   const config = getWebAuthConfig();
   const identity = getWebRequestIdentity(request, config);
   if (config.mode === "users" && !identity) return { error: "Authentication required" } as const;
+  if (config.mode === "selection" && !identity) return { error: "Profile selection required" } as const;
   return { config, identity } as const;
 }
 

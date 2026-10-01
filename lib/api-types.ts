@@ -99,10 +99,12 @@ export interface WebUserSummary {
 
 export interface WebAuthStatusResponse {
   enabled: boolean;
-  mode: "none" | "legacy" | "users";
+  mode: "none" | "legacy" | "users" | "selection";
   authenticated: boolean;
   user?: WebUserSummary;
   users?: WebUserSummary[];
+  profiles?: Array<Pick<WebUserSummary, "id" | "displayName">>;
+  selectedProfile?: Pick<WebUserSummary, "id" | "displayName"> | null;
 }
 
 export type PluginScope = "global" | "project";

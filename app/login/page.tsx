@@ -6,7 +6,8 @@ import { I18nProvider, useI18n } from "@/hooks/useI18n";
 import { clearPushSubscriptionForCurrentUser, isPushSupported, setupPushSubscription } from "@/lib/push-client";
 import { safeLoginDestination } from "@/lib/login-destination";
 
-type LoginMode = "loading" | "legacy" | "users" | "error";
+type LoginMode = "loading" | "legacy" | "users" | "selection" | "error";
+type ProfileChoice = { id: string; displayName: string };
 
 function safeDestination(): string {
   const destination = new URLSearchParams(window.location.search).get("next");
@@ -18,6 +19,8 @@ function LoginForm() {
   const [mode, setMode] = useState<LoginMode>("loading");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [profiles, setProfiles] = useState<ProfileChoice[]>([]);
+  const [profileId, setProfileId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -25,11 +28,32 @@ function LoginForm() {
     let cancelled = false;
     void fetch("/api/web-auth", { cache: "no-store" })
       .then(async (response) => {
-        const status = await response.json() as { mode?: string };
-        if (!response.ok || (status.mode !== "legacy" && status.mode !== "users")) {
+        const status = await response.json() as {
+          mode?: string;
+          profiles?: unknown;
+          selectedProfile?: { id?: unknown } | null;
+        };
+        if (!response.ok || (status.mode !== "legacy" && status.mode !== "users" && status.mode !== "selection")) {
           throw new Error("Authentication configuration is unavailable");
         }
-        if (!cancelled) setMode(status.mode);
+        if (status.mode === "selection") {
+          const choices = Array.isArray(status.profiles)
+            ? status.profiles.filter((profile): profile is ProfileChoice => (
+                typeof profile === "object" && profile !== null
+                && typeof (profile as ProfileChoice).id === "string"
+                && typeof (profile as ProfileChoice).displayName === "string"
+              ))
+            : [];
+          if (choices.length === 0) throw new Error("No profiles are configured");
+          if (!cancelled) {
+            setProfiles(choices);
+            const currentId = status.selectedProfile?.id;
+            setProfileId(typeof currentId === "string" && choices.some((profile) => profile.id === currentId) ? currentId : "");
+            setMode("selection");
+          }
+        } else if (!cancelled) {
+          setMode(status.mode);
+        }
       })
       .catch(() => {
         if (!cancelled) {
@@ -55,7 +79,9 @@ function LoginForm() {
       const response = await fetch("/api/web-auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(mode === "users" ? { username, password } : { password }),
+        body: JSON.stringify(mode === "selection"
+          ? { profileId }
+          : mode === "users" ? { username, password } : { password }),
       });
       if (!response.ok) {
         setError(await failureMessage(response));
@@ -80,47 +106,68 @@ function LoginForm() {
           <Image src="/icons/apple-touch-icon.png" width={52} height={52} alt="" priority />
           <div>
             <h1>Pi Web</h1>
-            <p>{t("auth.prompt")}</p>
+            <p>{mode === "selection" ? t("auth.profilePrompt") : t("auth.prompt")}</p>
           </div>
         </header>
         <form className="web-login-form" onSubmit={submit}>
           <div className="web-login-composer">
-            {mode === "users" && (
+            {mode === "selection" ? (
               <>
-                <label className="web-login-label" htmlFor="web-login-username">{t("auth.username")}</label>
-                <input
-                  id="web-login-username"
-                  type="text"
-                  value={username}
-                  onChange={(event) => setUsername(event.target.value)}
-                  placeholder={t("auth.username")}
-                  autoComplete="username"
+                <label className="web-login-label" htmlFor="web-login-profile">{t("auth.chooseProfile")}</label>
+                <select
+                  id="web-login-profile"
+                  className="web-login-profile-select"
+                  value={profileId}
+                  onChange={(event) => setProfileId(event.target.value)}
                   autoFocus
                   required
                   disabled={busy}
+                >
+                  <option value="" disabled>{t("auth.chooseProfile")}</option>
+                  {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.displayName}</option>)}
+                </select>
+              </>
+            ) : (
+              <>
+                {mode === "users" && (
+                  <>
+                    <label className="web-login-label" htmlFor="web-login-username">{t("auth.username")}</label>
+                    <input
+                      id="web-login-username"
+                      type="text"
+                      value={username}
+                      onChange={(event) => setUsername(event.target.value)}
+                      placeholder={t("auth.username")}
+                      autoComplete="username"
+                      autoFocus
+                      required
+                      disabled={busy}
+                    />
+                  </>
+                )}
+                <label className="web-login-label" htmlFor="web-login-password">{t("auth.password")}</label>
+                <input
+                  id="web-login-password"
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder={t("auth.password")}
+                  autoComplete="current-password"
+                  autoFocus={mode === "legacy"}
+                  required
+                  disabled={busy || mode === "loading" || mode === "error"}
                 />
               </>
             )}
-            <label className="web-login-label" htmlFor="web-login-password">{t("auth.password")}</label>
-            <input
-              id="web-login-password"
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder={t("auth.password")}
-              autoComplete="current-password"
-              autoFocus={mode === "legacy"}
-              required
-              disabled={busy || mode === "loading" || mode === "error"}
-            />
-            <button type="submit" disabled={busy || mode === "loading" || mode === "error" || !password || (mode === "users" && !username)}>
+            <button type="submit" disabled={busy || mode === "loading" || mode === "error" || (mode === "selection" ? !profileId : !password || (mode === "users" && !username))}>
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <line x1="2" y1="7" x2="11" y2="7" />
                 <polyline points="7.5 3 12 7 7.5 11" />
               </svg>
-              {busy ? t("auth.loggingIn") : t("auth.logIn")}
+              {busy ? t("auth.loggingIn") : mode === "selection" ? t("auth.continue") : t("auth.logIn")}
             </button>
           </div>
+          {mode === "selection" && <p className="web-login-note">{t("auth.profileNotice")}</p>}
           <p className="web-login-error" role="alert" aria-live="polite">{error}</p>
         </form>
       </div>

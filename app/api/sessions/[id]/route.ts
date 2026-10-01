@@ -185,8 +185,11 @@ export async function PATCH(
     if (hasOwner) {
       const config = getWebAuthConfig();
       const actor = getWebRequestIdentity(req, config);
-      if (config.mode !== "users" || !actor) {
-        return NextResponse.json({ error: "Session ownership requires an authenticated local user" }, { status: 409 });
+      if ((config.mode !== "users" && config.mode !== "selection") || !actor) {
+        const error = config.mode === "selection"
+          ? "Session ownership requires a selected local profile"
+          : "Session ownership requires an authenticated local user";
+        return NextResponse.json({ error }, { status: 409 });
       }
       if (body.ownerId !== null && (typeof body.ownerId !== "string" || !config.usersById.has(body.ownerId))) {
         return NextResponse.json({ error: "ownerId must identify a configured Pi Web user or be null" }, { status: 400 });

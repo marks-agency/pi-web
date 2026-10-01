@@ -31,7 +31,7 @@ interface WebPushEnvironment {
   saveState: (state: PushStateFile) => void;
   generateVapidKeys: () => PushStateFile["vapidKeys"];
   listSessionNames: () => Promise<Map<string, string>>;
-  getAuthMode?: () => "none" | "legacy" | "users";
+  getAuthMode?: () => "none" | "legacy" | "users" | "selection";
   getSessionOwnerId?: (sessionId: string) => string | undefined;
   getConfiguredUserIds?: () => readonly string[];
 }
@@ -115,7 +115,9 @@ function getDefaultEnvironment(): WebPushEnvironment {
     },
     getConfiguredUserIds() {
       const config = getWebAuthConfig();
-      return config.mode === "users" ? config.data.users.map((user) => user.id) : [];
+      return config.mode === "users" || config.mode === "selection"
+        ? config.data.users.map((user) => user.id)
+        : [];
     },
   };
 }
@@ -173,7 +175,8 @@ export function createWebPushNotifier(environment: WebPushEnvironment): WebPushN
     },
     async notifySessionComplete(sessionId) {
       let recipients = state.subscriptions;
-      if ((environment.getAuthMode?.() ?? "none") === "users") {
+      const authMode = environment.getAuthMode?.() ?? "none";
+      if (authMode === "users" || authMode === "selection") {
         const ownerId = environment.getSessionOwnerId?.(sessionId);
         const configuredUserIds = new Set(environment.getConfiguredUserIds?.() ?? []);
         if (!ownerId || !configuredUserIds.has(ownerId)) return;

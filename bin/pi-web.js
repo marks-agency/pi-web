@@ -16,7 +16,7 @@ const path = require("path");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const fs = require("fs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { getHelpText, parseLaunchOptions } = require("./pi-web-options");
+const { getHelpText, getListeningWarning, parseLaunchOptions } = require("./pi-web-options");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { getNextNodeArgs } = require("./pi-web-node-args");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -60,25 +60,13 @@ try {
   }
 }
 
-const loopbackHostnames = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-const authenticationConfigured = Boolean(process.env.PI_WEB_PASSWORD || process.env.PI_WEB_USERS_FILE);
-
 if (!fs.existsSync(nextDir)) {
   console.error("Build artifacts not found. Please report this issue.");
   process.exit(1);
 }
 
-if (!loopbackHostnames.has(hostname)) {
-  if (authenticationConfigured) {
-    console.warn(
-      `Warning: pi-web is listening on ${hostname} with authentication over HTTP. Use HTTPS or a trusted VPN to protect credentials in transit.`,
-    );
-  } else {
-    console.warn(
-      `Warning: pi-web is listening on ${hostname} without authentication. Only use this on a trusted network.`,
-    );
-  }
-}
+const listeningWarning = getListeningWarning(hostname, process.env);
+if (listeningWarning) console.warn(listeningWarning);
 
 const nextArgs = ["start", "-p", port];
 nextArgs.push("-H", hostname);

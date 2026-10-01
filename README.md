@@ -52,6 +52,7 @@ For port and hostname, command-line options override the corresponding environme
 | `PI_WEB_ALLOWED_HOSTS` | Additional exact proxy or custom hostnames, comma-separated | Unset |
 | `PI_WEB_PASSWORD` | Enable legacy single-password login; API clients may use Basic Auth with username `pi` | Authentication disabled |
 | `PI_WEB_USERS_FILE` | Absolute path to a private local-users JSON file; mutually exclusive with `PI_WEB_PASSWORD` | Unset |
+| `PI_WEB_AUTH_MODE=selection` | Require profile selection without an application password; requires `PI_WEB_USERS_FILE` | Unset |
 | `PI_WEB_IDLE_TIMEOUT_MS` | Session idle timeout in milliseconds, up to `2147483647`; `0` disables idle shutdown; invalid or out-of-range values use the default | `600000` (10 min) |
 
 For example:
@@ -81,7 +82,15 @@ pi-web --hostname 0.0.0.0
 
 The first `pi-web-user add` creates the accounts file and session-signing key; later calls add, rotate, or remove accounts. Passwords are prompted without terminal echo and stored as scrypt hashes. Keep the file private (`0600`); `PI_WEB_USERS_FILE` must be an absolute path and cannot be used together with `PI_WEB_PASSWORD`. Basic Auth remains available only in legacy single-password mode; local-user mode uses signed browser sessions.
 
-Team accounts are for attribution and notification routing, not isolation. Every member can read, continue, edit, and delete every session. Pi Web, its terminals, and agent shell tools also run as the same operating-system user, so members must be trusted with that host account and its credentials/settings. New sessions belong to their creator; historical sessions are unassigned until a member assigns an owner. In multi-user mode, completion pushes go only to the session owner; unassigned sessions and subscriptions not yet bound to a user do not receive them. The browser endpoint is associated with the signed-in account on app load and unlinked on logout. Legacy single-password and no-auth modes retain broadcast push behavior.
+For a trusted environment that already has an external access gate (for example, Caddy Basic Auth), profile selection can replace the Pi Web password prompt:
+
+```bash
+export PI_WEB_USERS_FILE="$HOME/.pi/agent/web-users.json"
+unset PI_WEB_PASSWORD
+PI_WEB_AUTH_MODE=selection pi-web --hostname 127.0.0.1
+```
+
+Selection mode is **not authentication**: it issues a signed attribution identity, not a per-person credential. Anyone who passes the external gate can select any configured profile. Keep Pi Web behind that trusted gate and loopback-bound; do not expose selection mode directly to the internet. Profiles in both local-user and selection modes are for attribution and notification routing, not isolation: every visitor can read, continue, edit, and delete every session. Pi Web, its terminals, and agent shell tools also run as the same operating-system user, so visitors must be trusted with that host account and its credentials/settings. New sessions belong to the current authenticated or selected profile; historical sessions are unassigned until an owner is assigned. In either mode, completion pushes go only to the session owner; unassigned sessions and subscriptions not yet bound to a profile do not receive them. Browser push endpoints are associated with the authenticated or selected profile and unlinked when logging out or switching profiles. Legacy single-password and no-auth modes retain broadcast push behavior.
 
 Authentication does not encrypt the connection. Do not expose Pi Web over plain HTTP to the internet; use HTTPS through a trusted reverse proxy or a trusted VPN. If a reverse proxy sends an external hostname, add that exact name to `PI_WEB_ALLOWED_HOSTS`. This allow-list does not change the address Pi Web binds to.
 

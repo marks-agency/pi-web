@@ -10,6 +10,7 @@ import {
 } from "@/lib/request-security";
 import {
   getWebAuthConfig,
+  getWebRequestIdentity,
   getWebSessionIdentity,
   isValidBasicAuthorization,
   PI_WEB_SESSION_COOKIE,
@@ -58,6 +59,26 @@ export function proxy(request: NextRequest) {
   if (config.mode === "none") {
     if (request.nextUrl.pathname === "/login") {
       return NextResponse.redirect(new URL("/", request.url));
+    }
+    return NextResponse.next();
+  }
+
+  if (config.mode === "selection") {
+    if (request.nextUrl.pathname === "/login" || request.nextUrl.pathname === "/api/web-auth") {
+      return NextResponse.next();
+    }
+    if (!getWebRequestIdentity(request, config)) {
+      if (!isApiRequest) {
+        const loginUrl = new URL("/login", request.url);
+        if (request.nextUrl.search) {
+          loginUrl.searchParams.set("next", `${request.nextUrl.pathname}${request.nextUrl.search}`);
+        }
+        return NextResponse.redirect(loginUrl);
+      }
+      return NextResponse.json(
+        { error: "Choose a profile to continue" },
+        { status: 401, headers: { "Cache-Control": "no-store" } },
+      );
     }
     return NextResponse.next();
   }

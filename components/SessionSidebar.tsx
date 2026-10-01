@@ -399,13 +399,20 @@ function PiWebTitle() {
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
-  const [ownerUsers, setOwnerUsers] = useState<WebUserSummary[]>([]);
+  const [ownerUsers, setOwnerUsers] = useState<Array<Pick<WebUserSummary, "id" | "displayName">>>([]);
   useEffect(() => {
     let active = true;
     void fetch("/api/web-auth", { cache: "no-store" })
-      .then((response) => response.ok ? response.json() as Promise<{ mode?: string; users?: WebUserSummary[] }> : null)
+      .then((response) => response.ok ? response.json() as Promise<{
+        mode?: string;
+        users?: WebUserSummary[];
+        profiles?: Array<Pick<WebUserSummary, "id" | "displayName">>;
+      }> : null)
       .then((data) => {
-        if (active) setOwnerUsers(data?.mode === "users" ? data.users ?? [] : []);
+        if (!active) return;
+        if (data?.mode === "users") setOwnerUsers(data.users ?? []);
+        else if (data?.mode === "selection") setOwnerUsers(data.profiles ?? []);
+        else setOwnerUsers([]);
       })
       .catch(() => { if (active) setOwnerUsers([]); });
     return () => { active = false; };
@@ -2233,7 +2240,7 @@ function SessionItem({
   onToggleCollapse,
 }: {
   session: SessionInfo;
-  ownerUsers: WebUserSummary[];
+  ownerUsers: Array<Pick<WebUserSummary, "id" | "displayName">>;
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;

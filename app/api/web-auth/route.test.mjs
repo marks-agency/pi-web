@@ -8,6 +8,7 @@ import { NextRequest } from "next/server.js";
 
 const originalPassword = process.env.PI_WEB_PASSWORD;
 const originalUsersFile = process.env.PI_WEB_USERS_FILE;
+const originalAuthMode = process.env.PI_WEB_AUTH_MODE;
 const jiti = createJiti(import.meta.url, {
   alias: { "@": process.cwd() },
   interopDefault: true,
@@ -15,7 +16,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const { GET, POST, DELETE } = await jiti.import("./route.ts");
 const { createWebUserRecord, createWebUsersFile } = await jiti.import("../../../lib/web-auth.ts");
-const { recordAuthSuccess } = await import("../../../lib/auth-throttle.ts");
+const { getAuthRetryAfterMs, recordAuthFailure, recordAuthSuccess } = await import("../../../lib/auth-throttle.ts");
 
 before(() => { process.env.PI_WEB_PASSWORD = "correct horse battery staple"; });
 beforeEach(() => { recordAuthSuccess(); });
@@ -25,6 +26,8 @@ after(() => {
   else process.env.PI_WEB_PASSWORD = originalPassword;
   if (originalUsersFile === undefined) delete process.env.PI_WEB_USERS_FILE;
   else process.env.PI_WEB_USERS_FILE = originalUsersFile;
+  if (originalAuthMode === undefined) delete process.env.PI_WEB_AUTH_MODE;
+  else process.env.PI_WEB_AUTH_MODE = originalAuthMode;
 });
 
 function request(method, body, headers = {}) {
@@ -96,6 +99,63 @@ test("logs in as a local user and returns its identity from the signed session",
     else process.env.PI_WEB_USERS_FILE = usersFileBefore;
     rmSync(directory, { recursive: true, force: true });
     recordAuthSuccess();
+  }
+});
+
+test("selection mode returns profiles and sets an attribution-only cookie without a password", async () => {
+  const previousPath = process.env.PI_WEB_USERS_FILE;
+  const previousPassword = process.env.PI_WEB_PASSWORD;
+  const previousMode = process.env.PI_WEB_AUTH_MODE;
+  const directory = mkdtempSync(join(tmpdir(), "pi-web-profile-api-"));
+  const path = join(directory, "users.json");
+  const user = createWebUserRecord({ id: "profile-123", username: "alice", displayName: "Alice", password: "fixture-only-password" });
+  writeFileSync(path, JSON.stringify(createWebUsersFile([user])), { mode: 0o600 });
+  chmodSync(path, 0o600);
+  process.env.PI_WEB_USERS_FILE = path;
+  process.env.PI_WEB_AUTH_MODE = "selection";
+  delete process.env.PI_WEB_PASSWORD;
+  try {
+    const status = await GET(request("GET"));
+    assert.deepEqual(await status.json(), {
+      enabled: false,
+      mode: "selection",
+      authenticated: false,
+      profiles: [{ id: user.id, displayName: user.displayName }],
+      selectedProfile: null,
+    });
+
+    const unknown = await POST(request("POST", { profileId: "missing-profile" }));
+    assert.equal(unknown.status, 400);
+
+    recordAuthFailure();
+    const selected = await POST(request("POST", { profileId: user.id }));
+    assert.equal(selected.status, 200);
+    assert.ok(getAuthRetryAfterMs() > 0, "profile selection must not clear password failure throttling");
+    const profileCookie = selected.cookies.get("pi_web_profile");
+    assert.match(profileCookie?.value ?? "", /^p1\./);
+    assert.equal(selected.cookies.get("pi_web_session")?.maxAge, 0);
+    assert.match(selected.headers.get("set-cookie") ?? "", /HttpOnly/i);
+
+    const selectedStatus = await GET(request("GET", undefined, {
+      Cookie: `pi_web_profile=${profileCookie?.value}`,
+    }));
+    const selectedBody = await selectedStatus.json();
+    assert.equal(selectedBody.authenticated, false);
+    assert.deepEqual(selectedBody.selectedProfile, { id: user.id, displayName: user.displayName });
+    assert.equal(Object.hasOwn(selectedBody, "users"), false);
+
+    const switched = await DELETE(request("DELETE"));
+    assert.equal(switched.cookies.get("pi_web_profile")?.maxAge, 0);
+    assert.equal(switched.cookies.get("pi_web_session")?.maxAge, 0);
+  } finally {
+    recordAuthSuccess();
+    if (previousPath === undefined) delete process.env.PI_WEB_USERS_FILE;
+    else process.env.PI_WEB_USERS_FILE = previousPath;
+    if (previousPassword === undefined) delete process.env.PI_WEB_PASSWORD;
+    else process.env.PI_WEB_PASSWORD = previousPassword;
+    if (previousMode === undefined) delete process.env.PI_WEB_AUTH_MODE;
+    else process.env.PI_WEB_AUTH_MODE = previousMode;
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

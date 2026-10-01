@@ -29,6 +29,21 @@ function normalizePort(value) {
   return String(port);
 }
 
+function getListeningWarning(hostname, env = process.env) {
+  const loopbackHostnames = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+  if (loopbackHostnames.has(hostname)) return null;
+
+  if (env.PI_WEB_AUTH_MODE?.trim() === "selection") {
+    return `Warning: pi-web is listening on ${hostname} with profile selection only (not authentication). Anyone who can reach it can choose any profile; keep it behind an external access gate and use HTTPS or a trusted VPN.`;
+  }
+
+  const authenticationConfigured = Boolean(env.PI_WEB_PASSWORD || env.PI_WEB_USERS_FILE);
+  if (authenticationConfigured) {
+    return `Warning: pi-web is listening on ${hostname} with authentication over HTTP. Use HTTPS or a trusted VPN to protect credentials in transit.`;
+  }
+  return `Warning: pi-web is listening on ${hostname} without authentication. Only use this on a trusted network.`;
+}
+
 function getHelpText() {
   return `Usage: pi-web [options]
 
@@ -46,6 +61,7 @@ Environment:
   PI_WEB_NO_OPEN             Set to 1/true/yes/on to disable browser open
   PI_WEB_PASSWORD            Enable legacy single-password login and API Basic Auth
   PI_WEB_USERS_FILE          Enable local multi-user login from a private JSON file
+  PI_WEB_AUTH_MODE           Set to selection (requires users file; attribution only, not authentication)
   PI_WEB_ALLOWED_HOSTS       Extra exact proxy/custom hostnames, comma-separated
   PI_WEB_SKIP_VERSION_CHECK  Set to 1 to disable Pi Web update checks
   PI_WEB_IDLE_TIMEOUT_MS     Session idle timeout in ms (0 disables; default 600000)
@@ -87,4 +103,4 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
   };
 }
 
-module.exports = { parseLaunchOptions, getHelpText };
+module.exports = { parseLaunchOptions, getHelpText, getListeningWarning };

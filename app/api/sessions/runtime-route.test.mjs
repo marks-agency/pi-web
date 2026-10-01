@@ -18,7 +18,12 @@ const jiti = createJiti(import.meta.url, {
 const { DELETE: deleteSession, GET: getSessionDetail, PATCH: renameSession } = await jiti.import("./[id]/route.ts");
 const { GET: getSessionList } = await jiti.import("./route.ts");
 const { GET: getRunningSessions } = await jiti.import("../agent/running/route.ts");
-const { createUserWebSessionToken, createWebUserRecord, createWebUsersFile } = await jiti.import("../../../lib/web-auth.ts");
+const {
+  createUserSelectionToken,
+  createUserWebSessionToken,
+  createWebUserRecord,
+  createWebUsersFile,
+} = await jiti.import("../../../lib/web-auth.ts");
 const { GET: getSessionState } = await jiti.import("./[id]/state/route.ts");
 const {
   cacheSessionPath,
@@ -82,6 +87,7 @@ test("assigns a session owner through authenticated identity and exposes it in s
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousUsersFile = process.env.PI_WEB_USERS_FILE;
   const previousPassword = process.env.PI_WEB_PASSWORD;
+  const previousAuthMode = process.env.PI_WEB_AUTH_MODE;
   process.env.PI_CODING_AGENT_DIR = dir;
   process.env.PI_WEB_USERS_FILE = join(dir, "web-users.json");
   delete process.env.PI_WEB_PASSWORD;
@@ -98,6 +104,8 @@ test("assigns a session owner through authenticated identity and exposes it in s
     else process.env.PI_WEB_USERS_FILE = previousUsersFile;
     if (previousPassword === undefined) delete process.env.PI_WEB_PASSWORD;
     else process.env.PI_WEB_PASSWORD = previousPassword;
+    if (previousAuthMode === undefined) delete process.env.PI_WEB_AUTH_MODE;
+    else process.env.PI_WEB_AUTH_MODE = previousAuthMode;
     if (sessionId) invalidateSessionPathCache(sessionId);
     invalidateSessionListCache();
     await rm(dir, { recursive: true, force: true });
@@ -121,6 +129,20 @@ test("assigns a session owner through authenticated identity and exposes it in s
   const detail = await getSessionDetail(new Request(url, { headers: { Cookie: cookie } }), { params: Promise.resolve({ id: sessionId }) });
   assert.equal(detail.status, 200);
   assert.equal((await detail.json()).info.ownerId, user.id);
+
+  process.env.PI_WEB_AUTH_MODE = "selection";
+  const profileToken = createUserSelectionToken(user, users.sessionSecret);
+  const profileCookie = `pi_web_profile=${profileToken}`;
+  const selectedOwner = await renameSession(new Request(url, {
+    method: "PATCH",
+    headers: { Cookie: profileCookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ ownerId: user.id }),
+  }), { params: Promise.resolve({ id: sessionId }) });
+  assert.equal(selectedOwner.status, 200);
+  assert.deepEqual(await selectedOwner.json(), { ok: true, ownerId: user.id, ownerName: "Alice" });
+  const selectedDetail = await getSessionDetail(new Request(url, { headers: { Cookie: profileCookie } }), { params: Promise.resolve({ id: sessionId }) });
+  assert.equal((await selectedDetail.json()).info.ownerName, "Alice");
+
   invalidateSessionListCache();
   const list = await (await getSessionList(new Request("http://localhost/api/sessions", { headers: { Cookie: cookie } }))).json();
   assert.equal(list.sessions.find((session) => session.id === sessionId).ownerName, "Alice");

@@ -74,7 +74,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [pushRegistering, setPushRegistering] = useState(false);
   const [pushStatus, setPushStatus] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
-  const [webAuthEnabled, setWebAuthEnabled] = useState(false);
+  const [webAuthMode, setWebAuthMode] = useState("none");
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState("");
 
@@ -82,7 +82,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
     setThinkingExpanded(isThinkingExpandedByDefault());
     void fetch("/api/web-auth")
       .then((response) => response.ok ? response.json() : null)
-      .then((data: { enabled?: boolean } | null) => setWebAuthEnabled(data?.enabled === true))
+      .then((data: { mode?: string } | null) => setWebAuthMode(data?.mode ?? "none"))
       .catch(() => {});
   }, []);
 
@@ -365,13 +365,15 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         </div>
       </section>
 
-      {webAuthEnabled && (
+      {webAuthMode !== "none" && (
         <section className="settings-general-section">
           <ConfigButton variant="secondary" disabled={loggingOut} onClick={() => void logOut()}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M10 17l5-5-5-5M15 12H3M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
             </svg>
-            {loggingOut ? t("auth.loggingOut") : t("auth.logOut")}
+            {loggingOut
+              ? webAuthMode === "selection" ? t("auth.switchingProfile") : t("auth.loggingOut")
+              : webAuthMode === "selection" ? t("auth.switchProfile") : t("auth.logOut")}
           </ConfigButton>
           {logoutError && <p role="alert" className="settings-general-error">{logoutError}</p>}
         </section>

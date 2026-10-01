@@ -7,12 +7,15 @@ import {
 } from "@/lib/auth-throttle";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import {
+  createUserSelectionToken,
   createUserWebSessionToken,
   createWebSessionToken,
   findWebUserByUsername,
   getWebAuthConfig,
   getWebRequestIdentity,
   isValidWebPassword,
+  PI_WEB_PROFILE_COOKIE,
+  PI_WEB_PROFILE_MAX_AGE,
   PI_WEB_SESSION_COOKIE,
   PI_WEB_SESSION_MAX_AGE,
   verifyWebUserPassword,
@@ -50,6 +53,18 @@ function clearSessionCookie(response: NextResponse, request: Request): void {
   });
 }
 
+function clearProfileCookie(response: NextResponse, request: Request): void {
+  response.cookies.set({
+    name: PI_WEB_PROFILE_COOKIE,
+    value: "",
+    httpOnly: true,
+    sameSite: "lax",
+    secure: isSecureRequest(request),
+    path: "/",
+    maxAge: 0,
+  });
+}
+
 function unavailableAuthConfig(): NextResponse {
   return NextResponse.json(
     { error: "Pi Web authentication is misconfigured" },
@@ -65,15 +80,24 @@ export async function GET(request: NextRequest) {
   try {
     const config = getWebAuthConfig();
     const identity = getWebRequestIdentity(request, config);
-    const authenticated = config.mode === "none" || identity !== null;
+    const authenticated = config.mode === "none"
+      || (config.mode !== "selection" && identity !== null);
     return NextResponse.json(
       {
-        enabled: config.mode !== "none",
+        enabled: config.mode === "legacy" || config.mode === "users",
         mode: config.mode,
         authenticated,
-        ...(identity ? { user: { id: identity.id, username: identity.username, displayName: identity.displayName } } : {}),
+        ...(config.mode !== "selection" && identity
+          ? { user: { id: identity.id, username: identity.username, displayName: identity.displayName } }
+          : {}),
         ...(config.mode === "users" && identity
           ? { users: config.data.users.map(({ id, username, displayName }) => ({ id, username, displayName })) }
+          : {}),
+        ...(config.mode === "selection"
+          ? {
+              profiles: config.data.users.map(({ id, displayName }) => ({ id, displayName })),
+              selectedProfile: identity ? { id: identity.id, displayName: identity.displayName } : null,
+            }
           : {}),
       },
       { headers: { "Cache-Control": "no-store" } },
@@ -101,6 +125,27 @@ export async function POST(request: NextRequest) {
   }
   if (config.mode === "none") {
     return NextResponse.json({ error: "Password authentication is disabled" }, { status: 404 });
+  }
+
+  if (config.mode === "selection") {
+    const body = await request.json().catch(() => null) as { profileId?: unknown } | null;
+    if (!body || typeof body.profileId !== "string") {
+      return NextResponse.json({ error: "profileId is required" }, { status: 400 });
+    }
+    const user = config.usersById.get(body.profileId);
+    if (!user) return NextResponse.json({ error: "Unknown profile" }, { status: 400 });
+    const response = NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
+    clearSessionCookie(response, request);
+    response.cookies.set({
+      name: PI_WEB_PROFILE_COOKIE,
+      value: createUserSelectionToken(user, config.data.sessionSecret),
+      httpOnly: true,
+      sameSite: "lax",
+      secure: isSecureRequest(request),
+      path: "/",
+      maxAge: PI_WEB_PROFILE_MAX_AGE,
+    });
+    return response;
   }
 
   const retryAfterMs = getAuthRetryAfterMs();
@@ -152,5 +197,6 @@ export async function DELETE(request: NextRequest) {
 
   const response = NextResponse.json({ ok: true });
   clearSessionCookie(response, request);
+  clearProfileCookie(response, request);
   return response;
 }

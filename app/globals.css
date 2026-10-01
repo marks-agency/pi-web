@@ -283,6 +283,25 @@ body {
   color: var(--text-dim);
 }
 
+.web-login-form select {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  border: none;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+}
+
+.web-login-note {
+  margin: 8px 4px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .web-login-error {
   min-height: 17px;
   margin: 7px 4px 0;

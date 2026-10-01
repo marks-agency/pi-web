@@ -4,7 +4,9 @@ import { isAbsolute } from "node:path";
 
 export const PI_WEB_AUTH_USERNAME = "pi";
 export const PI_WEB_SESSION_COOKIE = "pi_web_session";
+export const PI_WEB_PROFILE_COOKIE = "pi_web_profile";
 export const PI_WEB_SESSION_MAX_AGE = 60 * 60 * 24 * 30;
+export const PI_WEB_PROFILE_MAX_AGE = PI_WEB_SESSION_MAX_AGE;
 export const WEB_USER_PASSWORD_SALT_BYTES = 16;
 export const WEB_USER_PASSWORD_HASH_BYTES = 32;
 
@@ -32,13 +34,19 @@ export interface WebUserIdentity {
   id: string;
   username: string;
   displayName: string;
-  mode: "legacy" | "users";
+  mode: "legacy" | "users" | "selection";
+}
+
+interface WebUsersAuthConfig {
+  path: string;
+  data: WebUsersFile;
+  usersById: Map<string, WebUserRecord>;
 }
 
 export type WebAuthConfig =
   | { mode: "none" }
   | { mode: "legacy"; password: string }
-  | { mode: "users"; path: string; data: WebUsersFile; usersById: Map<string, WebUserRecord> };
+  | ({ mode: "users" | "selection" } & WebUsersAuthConfig);
 
 function hashSecret(value: string): Buffer {
   return createHash("sha256").update(value, "utf8").digest();
@@ -98,6 +106,14 @@ function parseWebUsersFile(value: unknown): WebUsersFile | null {
 export function getWebAuthConfig(): WebAuthConfig {
   const configuredUsersPath = process.env.PI_WEB_USERS_FILE?.trim();
   const legacyPassword = process.env.PI_WEB_PASSWORD;
+  const configuredMode = process.env.PI_WEB_AUTH_MODE?.trim();
+  if (configuredMode && configuredMode !== "selection") {
+    throw new Error("PI_WEB_AUTH_MODE must be 'selection' when set");
+  }
+  const selectionMode = configuredMode === "selection";
+  if (selectionMode && !configuredUsersPath) {
+    throw new Error("PI_WEB_AUTH_MODE=selection requires PI_WEB_USERS_FILE");
+  }
   if (configuredUsersPath) {
     if (isWebPasswordEnabled(legacyPassword)) {
       throw new Error("PI_WEB_USERS_FILE and PI_WEB_PASSWORD cannot both be configured");
@@ -120,7 +136,7 @@ export function getWebAuthConfig(): WebAuthConfig {
     const data = parseWebUsersFile(parsed);
     if (!data) throw new Error("Pi Web users file has an invalid format");
     return {
-      mode: "users",
+      mode: selectionMode ? "selection" : "users",
       path: configuredUsersPath,
       data,
       usersById: new Map(data.users.map((user) => [user.id, user])),
@@ -220,8 +236,56 @@ export function createUserWebSessionToken(
   return `${payload}.${sessionSignature(payload, Buffer.from(sessionSecret, "base64url"))}`;
 }
 
-function identityForUser(user: WebUserRecord): WebUserIdentity {
-  return { id: user.id, username: user.username, displayName: user.displayName, mode: "users" };
+function identityForUser(user: WebUserRecord, mode: "users" | "selection"): WebUserIdentity {
+  return { id: user.id, username: user.username, displayName: user.displayName, mode };
+}
+
+function profileSelectionSignature(payload: string, secret: string): string {
+  return createHmac("sha256", Buffer.from(secret, "base64url"))
+    .update(`pi-web-profile-selection:${payload}`, "utf8")
+    .digest("hex");
+}
+
+export function createUserSelectionToken(
+  user: Pick<WebUserRecord, "id">,
+  sessionSecret: string,
+  now = Date.now(),
+  nonce = randomBytes(16).toString("hex"),
+): string {
+  const claims = Buffer.from(JSON.stringify({
+    exp: Math.floor(now / 1000) + PI_WEB_PROFILE_MAX_AGE,
+    sub: user.id,
+    nonce,
+  }), "utf8").toString("base64url");
+  const payload = `p1.${claims}`;
+  return `${payload}.${profileSelectionSignature(payload, sessionSecret)}`;
+}
+
+export function getUserSelectionIdentity(
+  token: string | undefined,
+  config: WebAuthConfig,
+  now = Date.now(),
+): WebUserIdentity | null {
+  if (!token || config.mode !== "selection") return null;
+  const match = /^(p1\.([A-Za-z0-9_-]+))\.([a-f0-9]{64})$/.exec(token);
+  if (!match || Buffer.from(match[2], "base64url").toString("base64url") !== match[2]) return null;
+  let claims: unknown;
+  try {
+    claims = JSON.parse(Buffer.from(match[2], "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (typeof claims !== "object" || claims === null || Array.isArray(claims)) return null;
+  const record = claims as Record<string, unknown>;
+  if (
+    !Number.isSafeInteger(record.exp) || (record.exp as number) <= Math.floor(now / 1000)
+    || typeof record.sub !== "string"
+    || typeof record.nonce !== "string" || !/^[a-f0-9]{32}$/.test(record.nonce)
+  ) return null;
+  const user = config.usersById.get(record.sub);
+  if (!user) return null;
+  const expected = profileSelectionSignature(match[1], config.data.sessionSecret);
+  return secretsEqual(match[3], expected) ? identityForUser(user, "selection") : null;
 }
 
 export function getWebSessionIdentity(
@@ -256,7 +320,7 @@ export function getWebSessionIdentity(
   const user = config.usersById.get(claims.sub);
   if (!user || user.credentialVersion !== claims.cv) return null;
   const expected = sessionSignature(match[1], Buffer.from(config.data.sessionSecret, "base64url"));
-  return secretsEqual(match[3], expected) ? identityForUser(user) : null;
+  return secretsEqual(match[3], expected) ? identityForUser(user, "users") : null;
 }
 
 function cookieValue(request: Request, cookieName: string): string | undefined {
@@ -270,11 +334,14 @@ function cookieValue(request: Request, cookieName: string): string | undefined {
   return undefined;
 }
 
-/** Identity is derived only from a validated cookie or legacy Basic credentials. */
+/** Identity comes from a signed app session, selected-profile cookie, or legacy Basic credentials. */
 export function getWebRequestIdentity(
   request: Request,
   config: WebAuthConfig = getWebAuthConfig(),
 ): WebUserIdentity | null {
+  if (config.mode === "selection") {
+    return getUserSelectionIdentity(cookieValue(request, PI_WEB_PROFILE_COOKIE), config);
+  }
   const cookieIdentity = getWebSessionIdentity(cookieValue(request, PI_WEB_SESSION_COOKIE), config);
   if (cookieIdentity) return cookieIdentity;
   if (config.mode === "legacy" && isValidBasicAuthorization(request.headers.get("authorization"), config.password)) {
