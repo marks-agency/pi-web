@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -91,6 +91,7 @@ test("assigns a session owner through authenticated identity and exposes it in s
   process.env.PI_CODING_AGENT_DIR = dir;
   process.env.PI_WEB_USERS_FILE = join(dir, "web-users.json");
   delete process.env.PI_WEB_PASSWORD;
+  delete process.env.PI_WEB_AUTH_MODE;
   const user = createWebUserRecord({ id: "alice-id", username: "alice", displayName: "Alice", password: "a sufficiently long password" });
   const users = createWebUsersFile([user]);
   await writeFile(process.env.PI_WEB_USERS_FILE, JSON.stringify(users), { mode: 0o600 });
@@ -153,6 +154,98 @@ test("assigns a session owner through authenticated identity and exposes it in s
     body: JSON.stringify({ ownerId: "someone-else" }),
   }), { params: Promise.resolve({ id: sessionId }) });
   assert.equal(forged.status, 409);
+});
+
+test("hides and restores a session family per profile while preserving direct links", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-web-session-visibility-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousUsersFile = process.env.PI_WEB_USERS_FILE;
+  const previousPassword = process.env.PI_WEB_PASSWORD;
+  const previousAuthMode = process.env.PI_WEB_AUTH_MODE;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  process.env.PI_WEB_USERS_FILE = join(dir, "web-users.json");
+  delete process.env.PI_WEB_PASSWORD;
+  delete process.env.PI_WEB_AUTH_MODE;
+  const alice = createWebUserRecord({ id: "alice", username: "alice", password: "a sufficiently long password" });
+  const bob = createWebUserRecord({ id: "bob", username: "bob", password: "another sufficiently long password" });
+  const users = createWebUsersFile([alice, bob]);
+  await writeFile(process.env.PI_WEB_USERS_FILE, JSON.stringify(users), { mode: 0o600 });
+  await chmod(process.env.PI_WEB_USERS_FILE, 0o600);
+  invalidateSessionListCache();
+
+  const rootId = "visibility-root";
+  const childId = "visibility-child";
+  const projectSessionsDir = join(dir, "sessions", "visibility-project");
+  await mkdir(projectSessionsDir, { recursive: true });
+  const rootPath = join(projectSessionsDir, `session_${rootId}.jsonl`);
+  const childPath = join(projectSessionsDir, `session_${childId}.jsonl`);
+  const header = (id, parentSession) => JSON.stringify({
+    type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: dir,
+    ...(parentSession ? { parentSession } : {}),
+  });
+  await writeFile(rootPath, `${header(rootId)}\n`);
+  await writeFile(childPath, [
+    header(childId, rootPath),
+    JSON.stringify({
+      type: "custom", customType: "pi-web:subagent", id: "visibility-meta", parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      data: { version: 1, parentSessionId: rootId, parentSessionPath: rootPath, profile: "Explore", description: "Visibility test" },
+    }),
+    "",
+  ].join("\n"));
+  cacheSessionPath(rootId, rootPath);
+  cacheSessionPath(childId, childPath);
+
+  t.after(async () => {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousUsersFile === undefined) delete process.env.PI_WEB_USERS_FILE;
+    else process.env.PI_WEB_USERS_FILE = previousUsersFile;
+    if (previousPassword === undefined) delete process.env.PI_WEB_PASSWORD;
+    else process.env.PI_WEB_PASSWORD = previousPassword;
+    if (previousAuthMode === undefined) delete process.env.PI_WEB_AUTH_MODE;
+    else process.env.PI_WEB_AUTH_MODE = previousAuthMode;
+    invalidateSessionPathCache(rootId);
+    invalidateSessionPathCache(childId);
+    invalidateSessionListCache();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const aliceCookie = `pi_web_session=${createUserWebSessionToken(alice, users.sessionSecret)}`;
+  const bobCookie = `pi_web_session=${createUserWebSessionToken(bob, users.sessionSecret)}`;
+  const url = `http://localhost/api/sessions/${rootId}`;
+  const context = { params: Promise.resolve({ id: rootId }) };
+  const hide = await renameSession(new Request(url, {
+    method: "PATCH", headers: { Cookie: aliceCookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ hidden: true }),
+  }), context);
+  assert.equal(hide.status, 200);
+  assert.deepEqual((await hide.json()).sessionIds.sort(), [childId, rootId]);
+
+  const aliceList = await (await getSessionList(new Request("http://localhost/api/sessions", { headers: { Cookie: aliceCookie } }))).json();
+  const bobList = await (await getSessionList(new Request("http://localhost/api/sessions", { headers: { Cookie: bobCookie } }))).json();
+  assert.deepEqual(aliceList.hiddenSessionIds.sort(), [childId, rootId]);
+  assert.deepEqual(bobList.hiddenSessionIds, []);
+  assert.equal((await getSessionDetail(new Request(url, { headers: { Cookie: aliceCookie } }), context)).status, 200);
+
+  const restore = await renameSession(new Request(url, {
+    method: "PATCH", headers: { Cookie: aliceCookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ hidden: false }),
+  }), context);
+  assert.equal(restore.status, 200);
+  const restoredList = await (await getSessionList(new Request("http://localhost/api/sessions", { headers: { Cookie: aliceCookie } }))).json();
+  assert.deepEqual(restoredList.hiddenSessionIds, []);
+  const bobHide = await renameSession(new Request(url, {
+    method: "PATCH", headers: { Cookie: bobCookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ hidden: true }),
+  }), context);
+  assert.equal(bobHide.status, 200);
+
+  assert.equal((await deleteSession(new Request(url, { method: "DELETE" }), context)).status, 200);
+  const afterDelete = await (await getSessionList(new Request("http://localhost/api/sessions", { headers: { Cookie: aliceCookie } }))).json();
+  const bobAfterDelete = await (await getSessionList(new Request("http://localhost/api/sessions", { headers: { Cookie: bobCookie } }))).json();
+  assert.deepEqual(afterDelete.hiddenSessionIds, []);
+  assert.deepEqual(bobAfterDelete.hiddenSessionIds, []);
 });
 
 test("session listing returns a gzip-compressed response when the client accepts it", async (t) => {

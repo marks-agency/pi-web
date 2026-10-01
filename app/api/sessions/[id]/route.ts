@@ -25,6 +25,8 @@ import type { SessionEntry } from "@/lib/types";
 import { readSubagentRun, readSubagentSessionResources, SUBAGENT_META_TYPE } from "@/lib/subagents";
 import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { attachSessionOwnerInfo, deleteSessionOwners, setSessionOwnerId } from "@/lib/session-owners";
+import { deleteSessionVisibility, getSessionVisibilityProfileId, setSessionHidden } from "@/lib/session-visibility";
+import { getSessionFamily } from "@/lib/session-family";
 import { getWebAuthConfig, getWebRequestIdentity } from "@/lib/web-auth";
 import { jsonResponse } from "@/lib/json-response";
 
@@ -172,14 +174,45 @@ export async function PATCH(
 ) {
   const { id } = await params;
   try {
-    const body = await req.json() as { name?: unknown; ownerId?: unknown };
+    const body = await req.json() as { name?: unknown; ownerId?: unknown; hidden?: unknown };
     const hasName = Object.hasOwn(body, "name");
     const hasOwner = Object.hasOwn(body, "ownerId");
-    if (!hasName && !hasOwner) {
-      return NextResponse.json({ error: "name or ownerId is required" }, { status: 400 });
+    const hasHidden = Object.hasOwn(body, "hidden");
+    if (!hasName && !hasOwner && !hasHidden) {
+      return NextResponse.json({ error: "name, ownerId, or hidden is required" }, { status: 400 });
     }
     if (hasName && typeof body.name !== "string") {
       return NextResponse.json({ error: "name must be a string" }, { status: 400 });
+    }
+    if (hasHidden && typeof body.hidden !== "boolean") {
+      return NextResponse.json({ error: "hidden must be a boolean" }, { status: 400 });
+    }
+    if (hasHidden && (hasName || hasOwner)) {
+      return NextResponse.json({ error: "hidden cannot be combined with name or ownerId" }, { status: 400 });
+    }
+
+    if (hasHidden) {
+      const visibilityConfig = getWebAuthConfig();
+      const visibilityIdentity = getWebRequestIdentity(req, visibilityConfig);
+      if ((visibilityConfig.mode === "users" || visibilityConfig.mode === "selection") && !visibilityIdentity) {
+        return NextResponse.json({ error: "Session visibility requires an authenticated local profile" }, { status: 409 });
+      }
+      const profileId = getSessionVisibilityProfileId(req, visibilityConfig);
+      const live = getRpcSession(id);
+      const filePath = live?.isAlive() ? live.sessionFile : await resolveSessionPath(id);
+      if (!live?.isAlive() && !filePath) {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+      const sessions = mergeSessionLists(
+        await listAllSessions({ force: true }),
+        getRpcSessionInfos({ includeTransient: true }),
+      );
+      const family = getSessionFamily(sessions, id);
+      const familySessionIds = family
+        ? [family.root.id, ...family.subagents.map((session) => session.id)]
+        : [id];
+      setSessionHidden(profileId, familySessionIds, body.hidden as boolean);
+      return NextResponse.json({ ok: true, hidden: body.hidden, sessionIds: familySessionIds });
     }
 
     if (hasOwner) {
@@ -370,6 +403,7 @@ export async function DELETE(
       invalidateSessionManagerCache(deletedPath);
     }
     deleteSessionOwners(deletedSessionIds);
+    deleteSessionVisibility(deletedSessionIds);
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
   } catch (error) {

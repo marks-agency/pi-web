@@ -13,6 +13,7 @@ import {
   getRunningRpcSessionIds,
 } from "@/lib/rpc-manager";
 import { startServerPerf } from "@/lib/perf";
+import { getHiddenSessionIds, getSessionVisibilityProfileId } from "@/lib/session-visibility";
 
 export const dynamic = "force-dynamic";
 
@@ -36,23 +37,21 @@ export async function GET(req: Request) {
     ]);
     perf?.span("scan+projects");
     const sessions = mergeSessionLists(persistedSessions, runtimeSessions);
+    const hiddenSessionIds = [...getHiddenSessionIds(getSessionVisibilityProfileId(req))];
+    const responseBody = {
+      sessions,
+      hiddenSessionIds,
+      sessionListVersion,
+      runningSessionIds: getRunningRpcSessionIds(),
+      completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
+    };
     return perf?.attach(jsonResponse(
       req,
-      {
-        sessions,
-        sessionListVersion,
-        runningSessionIds: getRunningRpcSessionIds(),
-        completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
-      },
+      responseBody,
       { headers: { "Cache-Control": "no-store" } },
     )) ?? jsonResponse(
       req,
-      {
-        sessions,
-        sessionListVersion,
-        runningSessionIds: getRunningRpcSessionIds(),
-        completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
-      },
+      responseBody,
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {

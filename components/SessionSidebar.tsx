@@ -399,6 +399,8 @@ function PiWebTitle() {
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  const [hiddenSessionIds, setHiddenSessionIds] = useState<Set<string>>(() => new Set());
+  const [showHiddenSessions, setShowHiddenSessions] = useState(false);
   const [ownerUsers, setOwnerUsers] = useState<Array<Pick<WebUserSummary, "id" | "displayName">>>([]);
   useEffect(() => {
     let active = true;
@@ -549,12 +551,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const data = await res.json() as {
         sessions: SessionInfo[];
         sessionListVersion: number;
+        hiddenSessionIds?: string[];
         runningSessionIds?: string[];
         completionNotificationSuppressedSessionIds?: string[];
       };
       if (loadId !== sessionLoadIdRef.current) return;
       sessionListVersionRef.current = data.sessionListVersion;
       setAllSessions(data.sessions);
+      setHiddenSessionIds(new Set(data.hiddenSessionIds ?? []));
       // Treat the fetched running set as an initial fallback only. Once the
       // lightweight poll is live, a slow session-list fetch cannot overwrite it.
       if (!runningPollAuthoritativeRef.current) {
@@ -1171,13 +1175,21 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       : null);
 
   const sessionFamilies = useMemo(() => listSessionFamilies(filteredSessions), [filteredSessions]);
+  const hiddenFamilyCount = useMemo(
+    () => sessionFamilies.filter((family) => hiddenSessionIds.has(family.root.id)).length,
+    [hiddenSessionIds, sessionFamilies],
+  );
+  const visibleSessionFamilies = useMemo(
+    () => sessionFamilies.filter((family) => hiddenSessionIds.has(family.root.id) === showHiddenSessions),
+    [hiddenSessionIds, sessionFamilies, showHiddenSessions],
+  );
 
   const virtualIndices = useMemo(() => getSessionListIndices(
-    sessionFamilies.length,
+    visibleSessionFamilies.length,
     listScrollTop,
     listViewportH,
-    sessionFamilies.findIndex((family) => family.root.id === focusedSessionId),
-  ), [focusedSessionId, listScrollTop, listViewportH, sessionFamilies]);
+    visibleSessionFamilies.findIndex((family) => family.root.id === focusedSessionId),
+  ), [focusedSessionId, listScrollTop, listViewportH, visibleSessionFamilies]);
 
   return (
     <div
@@ -1861,7 +1873,24 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           overflow: "hidden",
         }}
       >
-        <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
+        {(hiddenFamilyCount > 0 || showHiddenSessions) && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "5px 10px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+            <span style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap" }}>
+              {showHiddenSessions ? t("sidebar.hiddenSessions") : t("sidebar.activeSessions")}
+            </span>
+            <button
+              type="button"
+              aria-pressed={showHiddenSessions}
+              onClick={() => setShowHiddenSessions((show) => !show)}
+              className="cursor-pointer rounded border border-border bg-bg-hover px-2 py-1 text-[10px] text-text-muted hover:bg-bg-selected hover:text-accent"
+            >
+              {showHiddenSessions
+                ? t("sidebar.showActiveSessions")
+                : t("sidebar.showHiddenSessions", { count: hiddenFamilyCount })}
+            </button>
+          </div>
+        )}
+        <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} showHidden={showHiddenSessions} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
         <div
           ref={listScrollRef}
           onScroll={handleListScroll}
@@ -1883,20 +1912,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             {error}
           </div>
         )}
-        {!loading && !error && sessionFamilies.length === 0 && (
+        {!loading && !error && visibleSessionFamilies.length === 0 && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
-            {t("sidebar.noSessions")}
+            {showHiddenSessions ? t("sidebar.noHiddenSessions") : t("sidebar.noSessions")}
           </div>
         )}
-        {sessionFamilies.length > 0 && (
+        {visibleSessionFamilies.length > 0 && (
           <div
             style={{
               position: "relative",
-              height: sessionFamilies.length * SESSION_LIST_ITEM_HEIGHT,
+              height: visibleSessionFamilies.length * SESSION_LIST_ITEM_HEIGHT,
             }}
           >
             {virtualIndices.map((index) => {
-              const family = sessionFamilies[index];
+              const family = visibleSessionFamilies[index];
               const familySessions = [family.root, ...family.subagents];
               const displaySession = family.latestModified === family.root.modified
                 ? family.root
@@ -1915,8 +1944,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                     isSelected={familySessions.some((session) => session.id === selectedSessionId)}
                     isRunning={familySessions.some((session) => runningSessionIds.has(session.id))}
                     isUnread={familySessions.some((session) => unreadSessionIds.has(session.id))}
+                    isHidden={hiddenSessionIds.has(family.root.id)}
                     onClick={() => handleSelectSessionFromList(family.root)}
                     onRenamed={loadSessions}
+                    onVisibilityChanged={() => void loadSessions(false, true)}
                     onDeleted={(id) => {
                       onSessionDeleted?.(id);
                       loadSessions();
@@ -2229,11 +2260,13 @@ function SessionItem({
   session,
   ownerUsers,
   isSelected,
+  isHidden = false,
   isRunning,
   isUnread,
   onClick,
   onRenamed,
   onDeleted,
+  onVisibilityChanged,
   depth = 0,
   hasChildren = false,
   collapsed = false,
@@ -2244,9 +2277,11 @@ function SessionItem({
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
+  isHidden?: boolean;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
+  onVisibilityChanged?: () => void;
   depth?: number;
   hasChildren?: boolean;
   collapsed?: boolean;
@@ -2260,6 +2295,8 @@ function SessionItem({
   const [deleting, setDeleting] = useState(false);
   const [ownerSaving, setOwnerSaving] = useState(false);
   const [ownerError, setOwnerError] = useState(false);
+  const [visibilitySaving, setVisibilitySaving] = useState(false);
+  const [visibilityError, setVisibilityError] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Select the whole name once the rename input is mounted (startRename's
@@ -2302,6 +2339,25 @@ function SessionItem({
       setOwnerSaving(false);
     }
   }, [onRenamed, session.id]);
+
+  const toggleVisibility = useCallback(async (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    setVisibilitySaving(true);
+    setVisibilityError(false);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hidden: !isHidden }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      onVisibilityChanged?.();
+    } catch {
+      setVisibilityError(true);
+    } finally {
+      setVisibilitySaving(false);
+    }
+  }, [isHidden, onVisibilityChanged, session.id]);
 
   const commitRename = useCallback(async () => {
     const name = renameValue.trim();
@@ -2566,6 +2622,27 @@ function SessionItem({
                   {ownerUsers.map((user) => <option key={user.id} value={user.id}>{user.displayName}</option>)}
                 </select>
               )}
+              <button
+                type="button"
+                aria-label={isHidden ? t("session.restoreToPicker") : t("session.hideFromPicker")}
+                onClick={(event) => void toggleVisibility(event)}
+                disabled={visibilitySaving}
+                title={visibilityError ? t("session.visibilityUpdateFailed") : isHidden ? t("session.restoreToPicker") : t("session.hideFromPicker")}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 32, height: 32, padding: 0,
+                  background: "var(--bg-hover)", border: "1px solid var(--border)",
+                  borderRadius: 7, color: visibilityError ? "#ef4444" : "var(--text-muted)",
+                  cursor: visibilitySaving ? "wait" : "pointer", flexShrink: 0,
+                  opacity: visibilitySaving ? 0.6 : 1,
+                }}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" />
+                  <circle cx="12" cy="12" r="3" />
+                  {!isHidden && <path d="m4 4 16 16" />}
+                </svg>
+              </button>
               <button
                 onClick={startRename}
                 title={t("sidebar.rename")}

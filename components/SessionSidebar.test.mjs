@@ -7,6 +7,7 @@ const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconf
 const { getSessionListIndices } = await jiti.import("./SessionSidebar.tsx");
 
 const source = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
+const searchSource = await readFile(new URL("./SessionSearch.tsx", import.meta.url), "utf8");
 const globalStyles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const sessionItemSource = source.slice(source.indexOf("function SessionItem("));
 
@@ -148,6 +149,16 @@ test("lifecycle refreshes bypass the cache while cross-window polling reuses it"
 test("does not expose disk-backed actions for transient sessions", () => {
   assert.match(sessionItemSource, /if \(session\.transient\) return;/);
   assert.match(sessionItemSource, /\{hovered && !session\.transient && \(/);
+});
+
+test("hides and restores session families without removing direct-link sessions", () => {
+  assert.match(source, /setHiddenSessionIds\(new Set\(data\.hiddenSessionIds \?\? \[\]\)\)/);
+  assert.match(source, /hiddenSessionIds\.has\(family\.root\.id\) === showHiddenSessions/);
+  assert.match(sessionItemSource, /body: JSON\.stringify\(\{ hidden: !isHidden \}\)/);
+  assert.match(source, /sidebar\.showHiddenSessions/);
+  assert.match(source, /sidebar\.showActiveSessions/);
+  assert.match(source, /onSessionsChange\?\.\(allSessions\)/);
+  assert.match(searchSource, /if \(showHidden\) params\.set\("hidden", "1"\)/);
 });
 
 test("hides subagent rows and aggregates their state into the main session row", () => {

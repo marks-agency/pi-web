@@ -6,18 +6,19 @@ import { formatRelativeTime } from "@/lib/i18n/format";
 import type { SessionInfo } from "@/lib/types";
 import type { SessionSearchResponse } from "@/lib/session-search";
 
-export function SessionSearch({ open, query, children, selectedSessionId, onSelectSession }: {
+export function SessionSearch({ open, query, showHidden, children, selectedSessionId, onSelectSession }: {
   open: boolean;
   query: string;
+  showHidden: boolean;
   children: ReactNode;
   selectedSessionId: string | null;
   onSelectSession: (session: SessionInfo, entryId?: string, blockIndex?: number) => void;
 }) {
   const { t, locale } = useI18n();
-  const [state, setState] = useState<{ query: string; response?: SessionSearchResponse; failed?: boolean }>({ query: "" });
+  const [state, setState] = useState<{ query: string; showHidden: boolean; response?: SessionSearchResponse; failed?: boolean }>({ query: "", showHidden: false });
   const search = query.trim();
-  const response = state.query === search ? state.response : undefined;
-  const failed = state.query === search && state.failed;
+  const response = state.query === search && state.showHidden === showHidden ? state.response : undefined;
+  const failed = state.query === search && state.showHidden === showHidden && state.failed;
 
   // Re-runs only when the query changes. It deliberately does not depend on the
   // session-list version: ordinary agent activity bumps that version every few
@@ -26,22 +27,24 @@ export function SessionSearch({ open, query, children, selectedSessionId, onSele
   useEffect(() => {
     if (!open || !search) return;
     const controller = new AbortController();
-    setState({ query: search });
+    setState({ query: search, showHidden });
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/sessions/search?${new URLSearchParams({ q: search })}`, { signal: controller.signal });
+        const params = new URLSearchParams({ q: search });
+        if (showHidden) params.set("hidden", "1");
+        const res = await fetch(`/api/sessions/search?${params}`, { signal: controller.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json() as SessionSearchResponse;
-        if (!controller.signal.aborted) setState({ query: search, response: data });
+        if (!controller.signal.aborted) setState({ query: search, showHidden, response: data });
       } catch {
-        if (!controller.signal.aborted) setState({ query: search, failed: true });
+        if (!controller.signal.aborted) setState({ query: search, showHidden, failed: true });
       }
     }, 300);
     return () => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [open, search]);
+  }, [open, search, showHidden]);
 
   return !open || !search ? children : (
     <div className="min-h-20 flex-1 overflow-y-auto" aria-busy={!response && !failed}>

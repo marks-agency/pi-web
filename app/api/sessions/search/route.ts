@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { listAllSessions } from "@/lib/session-reader";
 import { searchSessionContents } from "@/lib/session-search";
+import { getHiddenSessionIds, getSessionVisibilityProfileId } from "@/lib/session-visibility";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +20,10 @@ export async function GET(request: Request) {
     // seconds is not searched yet; the stale read schedules the rebuild, so the
     // next search sees it.
     const sessions = query && !request.signal.aborted ? await listAllSessions({ allowStale: true }) : [];
-    return NextResponse.json(await searchSessionContents(sessions, query, request.signal), { headers });
+    const hiddenSessionIds = getHiddenSessionIds(getSessionVisibilityProfileId(request));
+    const hiddenOnly = new URL(request.url).searchParams.get("hidden") === "1";
+    const visibleSessions = sessions.filter((session) => hiddenSessionIds.has(session.id) === hiddenOnly);
+    return NextResponse.json(await searchSessionContents(visibleSessions, query, request.signal), { headers });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500, headers });
   }
