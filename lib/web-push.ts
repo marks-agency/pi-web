@@ -5,9 +5,15 @@ import webpush from "web-push";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { enLocale } from "./i18n/messages/en";
 import { zhCNLocale } from "./i18n/messages/zh-CN";
+import { zhTWLocale } from "./i18n/messages/zh-TW";
 import { getAgentDir } from "./session-reader";
 import { getSessionOwnerId as readSessionOwnerId } from "./session-owners";
-import { getWebAuthConfig } from "./web-auth";
+import {
+  NOTIFICATION_COOLDOWN_MS,
+  NOTIFICATION_IDLE_MS,
+  NOTIFICATION_PRESENCE_TTL_MS,
+} from "./notification-policy";
+import { getWebAuthConfig, getWebRequestIdentity } from "./web-auth";
 
 export interface PushSubscriptionRecord {
   endpoint: string;
@@ -19,6 +25,22 @@ export interface PushSubscriptionRecord {
 interface PushStateFile {
   vapidKeys: { publicKey: string; privateKey: string };
   subscriptions: PushSubscriptionRecord[];
+}
+
+export interface NotificationPresence {
+  visible: boolean;
+  focused: boolean;
+  lastActivityAt: number;
+}
+
+interface PresenceRecord extends NotificationPresence {
+  reportedAt: number;
+}
+
+interface CompletionQueue {
+  lastSentAt: number | null;
+  pendingSessionIds: Map<string, number>;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 interface WebPushEnvironment {
@@ -34,12 +56,17 @@ interface WebPushEnvironment {
   getAuthMode?: () => "none" | "legacy" | "users" | "selection";
   getSessionOwnerId?: (sessionId: string) => string | undefined;
   getConfiguredUserIds?: () => readonly string[];
+  now?: () => number;
+  setTimeout?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+  clearTimeout?: (timer: ReturnType<typeof setTimeout>) => void;
 }
 
 export interface WebPushNotifier {
   getVapidPublicKey: () => string;
   addSubscription: (subscription: PushSubscriptionRecord) => void;
   removeSubscription: (endpoint: string, userId?: string) => void;
+  reportPresence: (profileId: string, clientId: string, presence: NotificationPresence) => boolean;
+  removePresence: (profileId: string, clientId: string) => void;
   notifySessionComplete: (sessionId: string) => Promise<void>;
 }
 
@@ -63,6 +90,8 @@ export function vapidSubject(): string {
 // Ask the push service to deliver immediately. Lower urgencies let idle
 // devices (especially iOS) defer delivery to an arbitrary later window.
 export const PUSH_OPTIONS = { TTL: 2419200, urgency: "high" as const };
+const MAX_PRESENCE_CLIENTS_PER_PROFILE = 32;
+const GLOBAL_NOTIFICATION_PROFILE = "__global__";
 
 function getDefaultEnvironment(): WebPushEnvironment {
   return {
@@ -132,23 +161,170 @@ function pushStatusCode(error: unknown): number | undefined {
  * Locale lookup for push payloads. The browser reports its UI locale when it
  * subscribes; unknown locales fall back to English.
  */
-export function localeText(locale: string, key: "sessionComplete" | "taskFinished"): string {
-  if (locale === "zh-CN") {
-    const message = zhCNLocale.messages[key === "sessionComplete" ? "i18n.sessionComplete" : "i18n.taskFinished"];
-    if (message) return message;
-  }
-  const message = enLocale.messages[key === "sessionComplete" ? "i18n.sessionComplete" : "i18n.taskFinished"];
-  return message ?? (key === "sessionComplete" ? "Session complete" : "Task finished.");
+type PushTextKey = "sessionComplete" | "taskFinished" | "multipleSessionsComplete" | "reviewCompletedSessions";
+
+const pushTextFallbacks: Record<PushTextKey, string> = {
+  sessionComplete: "Session complete",
+  taskFinished: "Task finished.",
+  multipleSessionsComplete: "{count} sessions finished",
+  reviewCompletedSessions: "Open Pi Web to review them.",
+};
+
+export function localeText(locale: string, key: PushTextKey, count = 1): string {
+  const dictionaries: Record<string, Record<string, string>> = {
+    en: enLocale.messages,
+    "zh-CN": zhCNLocale.messages,
+    "zh-TW": zhTWLocale.messages,
+  };
+  const message = dictionaries[locale]?.[`i18n.${key}`] ?? enLocale.messages[`i18n.${key}`] ?? pushTextFallbacks[key];
+  return message.replaceAll("{count}", String(count));
 }
 
 export function createWebPushNotifier(environment: WebPushEnvironment): WebPushNotifier {
-  const state: PushStateFile = (() => {
-    const loaded = environment.loadState();
-    if (loaded?.vapidKeys?.publicKey && loaded.vapidKeys.privateKey) return loaded;
-    return { vapidKeys: environment.generateVapidKeys(), subscriptions: [] };
-  })();
+  const loaded = environment.loadState();
+  const state: PushStateFile = {
+    vapidKeys: loaded?.vapidKeys?.publicKey && loaded.vapidKeys.privateKey
+      ? loaded.vapidKeys
+      : { publicKey: "", privateKey: "" },
+    subscriptions: loaded?.subscriptions ?? [],
+  };
+  const ensureVapidKeys = () => {
+    if (!state.vapidKeys.publicKey || !state.vapidKeys.privateKey) {
+      state.vapidKeys = environment.generateVapidKeys();
+    }
+  };
+  const queues = new Map<string, CompletionQueue>();
+  const presenceByProfile = new Map<string, Map<string, PresenceRecord>>();
   const saveState = () => {
+    ensureVapidKeys();
     environment.saveState(state);
+  };
+  const now = () => environment.now?.() ?? Date.now();
+  const scheduleTimer = environment.setTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+  const cancelTimer = environment.clearTimeout ?? ((timer) => clearTimeout(timer));
+
+  const getQueue = (profileId: string): CompletionQueue => {
+    let queue = queues.get(profileId);
+    if (!queue) {
+      queue = { lastSentAt: null, pendingSessionIds: new Map(), timer: null };
+      queues.set(profileId, queue);
+    }
+    return queue;
+  };
+
+  const prunePresence = (time: number) => {
+    for (const [profileId, clients] of presenceByProfile) {
+      for (const [clientId, record] of clients) {
+        if (time - record.reportedAt > NOTIFICATION_PRESENCE_TTL_MS) clients.delete(clientId);
+      }
+      if (clients.size === 0) presenceByProfile.delete(profileId);
+    }
+  };
+
+  const isProfileEngaged = (profileId: string, time = now()): boolean => {
+    prunePresence(time);
+    const clients = presenceByProfile.get(profileId);
+    if (!clients) return false;
+    return [...clients.values()].some((record) => (
+      record.visible
+      && record.focused
+      && record.lastActivityAt <= time
+      && time - record.lastActivityAt < NOTIFICATION_IDLE_MS
+    ));
+  };
+
+  const clearPending = (profileId: string) => {
+    const queue = queues.get(profileId);
+    if (!queue) return;
+    queue.pendingSessionIds.clear();
+    if (queue.timer !== null) cancelTimer(queue.timer);
+    queue.timer = null;
+    if (queue.lastSentAt === null) queues.delete(profileId);
+  };
+
+  const recipientsFor = (profileId: string, authMode: ReturnType<NonNullable<WebPushEnvironment["getAuthMode"]>>): PushSubscriptionRecord[] => {
+    if (authMode === "users" || authMode === "selection") {
+      if (profileId === GLOBAL_NOTIFICATION_PROFILE) return [];
+      const configuredUserIds = new Set(environment.getConfiguredUserIds?.() ?? []);
+      if (!configuredUserIds.has(profileId)) return [];
+      return state.subscriptions.filter((subscription) => subscription.userId === profileId);
+    }
+    return profileId === GLOBAL_NOTIFICATION_PROFILE ? state.subscriptions : [];
+  };
+
+  const deliver = async (profileId: string, sessionIds: string[]) => {
+    const authMode = environment.getAuthMode?.() ?? "none";
+    const currentSessionIds = authMode === "users" || authMode === "selection"
+      ? sessionIds.filter((sessionId) => environment.getSessionOwnerId?.(sessionId) === profileId)
+      : sessionIds;
+    const recipients = recipientsFor(profileId, authMode);
+    if (currentSessionIds.length === 0 || recipients.length === 0) return;
+
+    ensureVapidKeys();
+    let names = new Map<string, string>();
+    try {
+      names = await environment.listSessionNames();
+    } catch {
+      // Session names are best-effort; use localized generic text instead.
+    }
+    const singleSessionId = currentSessionIds.length === 1 ? currentSessionIds[0] : null;
+    let pruned = false;
+    for (const subscription of [...recipients]) {
+      const locale = subscription.locale;
+      const payload = singleSessionId
+        ? {
+            title: names.get(singleSessionId) ?? localeText(locale, "sessionComplete"),
+            body: localeText(locale, "taskFinished"),
+            url: `/?session=${encodeURIComponent(singleSessionId)}`,
+            tag: `pi-session-complete:${singleSessionId}`,
+          }
+        : {
+            title: localeText(locale, "multipleSessionsComplete", currentSessionIds.length),
+            body: localeText(locale, "reviewCompletedSessions"),
+            url: "/",
+            tag: `pi-session-complete-digest:${profileId}`,
+          };
+      try {
+        await environment.send(subscription, JSON.stringify(payload), state.vapidKeys);
+      } catch (error) {
+        const statusCode = pushStatusCode(error);
+        if (statusCode === 404 || statusCode === 410) {
+          state.subscriptions = state.subscriptions.filter((candidate) => candidate.endpoint !== subscription.endpoint);
+          pruned = true;
+        }
+      }
+    }
+    if (pruned) saveState();
+  };
+
+  const scheduleFlush = (profileId: string) => {
+    const queue = getQueue(profileId);
+    if (queue.timer !== null || queue.lastSentAt === null || queue.pendingSessionIds.size === 0) return;
+    const delay = Math.max(0, queue.lastSentAt + NOTIFICATION_COOLDOWN_MS - now());
+    queue.timer = scheduleTimer(() => {
+      queue.timer = null;
+      void flushPending(profileId).catch((error) => {
+        console.error("[pi-web] failed to send completion digest:", error instanceof Error ? error.message : error);
+      });
+    }, delay);
+  };
+
+  const flushPending = async (profileId: string) => {
+    const queue = queues.get(profileId);
+    if (!queue || queue.pendingSessionIds.size === 0) return;
+    const time = now();
+    if (isProfileEngaged(profileId, time)) {
+      clearPending(profileId);
+      return;
+    }
+    if (queue.lastSentAt !== null && time - queue.lastSentAt < NOTIFICATION_COOLDOWN_MS) {
+      scheduleFlush(profileId);
+      return;
+    }
+    const sessionIds = [...queue.pendingSessionIds.keys()];
+    queue.pendingSessionIds.clear();
+    queue.lastSentAt = time;
+    await deliver(profileId, sessionIds);
   };
 
   return {
@@ -173,41 +349,56 @@ export function createWebPushNotifier(environment: WebPushEnvironment): WebPushN
         saveState();
       }
     },
+    reportPresence(profileId, clientId, presence) {
+      const time = now();
+      prunePresence(time);
+      let clients = presenceByProfile.get(profileId);
+      if (!clients) {
+        clients = new Map();
+        presenceByProfile.set(profileId, clients);
+      }
+      if (!clients.has(clientId) && clients.size >= MAX_PRESENCE_CLIENTS_PER_PROFILE) {
+        const oldestClientId = [...clients.entries()].sort((a, b) => a[1].reportedAt - b[1].reportedAt)[0]?.[0];
+        if (oldestClientId) clients.delete(oldestClientId);
+      }
+      clients.set(clientId, { ...presence, reportedAt: time });
+      const engaged = isProfileEngaged(profileId, time);
+      if (engaged) clearPending(profileId);
+      return engaged;
+    },
+    removePresence(profileId, clientId) {
+      const clients = presenceByProfile.get(profileId);
+      clients?.delete(clientId);
+      if (clients?.size === 0) presenceByProfile.delete(profileId);
+    },
     async notifySessionComplete(sessionId) {
-      let recipients = state.subscriptions;
       const authMode = environment.getAuthMode?.() ?? "none";
+      let profileId = GLOBAL_NOTIFICATION_PROFILE;
       if (authMode === "users" || authMode === "selection") {
-        const ownerId = environment.getSessionOwnerId?.(sessionId);
+        profileId = environment.getSessionOwnerId?.(sessionId) ?? "";
         const configuredUserIds = new Set(environment.getConfiguredUserIds?.() ?? []);
-        if (!ownerId || !configuredUserIds.has(ownerId)) return;
-        recipients = state.subscriptions.filter((subscription) => subscription.userId === ownerId);
+        if (!profileId || !configuredUserIds.has(profileId)) return;
       }
-      if (recipients.length === 0) return;
-      const sessionName = (await environment.listSessionNames()).get(sessionId);
-      const payloadFor = (locale: string) => ({
-        title: sessionName ?? localeText(locale, "sessionComplete"),
-        body: localeText(locale, "taskFinished"),
-        url: `/?session=${encodeURIComponent(sessionId)}`,
-        tag: `pi-session-complete:${sessionId}`,
-      });
+      if (recipientsFor(profileId, authMode).length === 0) return;
+      const time = now();
+      if (isProfileEngaged(profileId, time)) {
+        clearPending(profileId);
+        return;
+      }
 
-      let pruned = false;
-      for (const subscription of [...recipients]) {
-        try {
-          await environment.send(
-            subscription,
-            JSON.stringify(payloadFor(subscription.locale)),
-            state.vapidKeys,
-          );
-        } catch (error) {
-          const statusCode = pushStatusCode(error);
-          if (statusCode === 404 || statusCode === 410) {
-            state.subscriptions = state.subscriptions.filter((s) => s.endpoint !== subscription.endpoint);
-            pruned = true;
-          }
-        }
+      const queue = getQueue(profileId);
+      if (queue.lastSentAt !== null && time - queue.lastSentAt < NOTIFICATION_COOLDOWN_MS) {
+        queue.pendingSessionIds.set(sessionId, time);
+        scheduleFlush(profileId);
+        return;
       }
-      if (pruned) saveState();
+      const sessionIds = [...queue.pendingSessionIds.keys()];
+      if (!sessionIds.includes(sessionId)) sessionIds.push(sessionId);
+      queue.pendingSessionIds.clear();
+      if (queue.timer !== null) cancelTimer(queue.timer);
+      queue.timer = null;
+      queue.lastSentAt = time;
+      await deliver(profileId, sessionIds);
     },
   };
 }
@@ -233,6 +424,27 @@ export function addSubscription(subscription: PushSubscriptionRecord): Promise<v
 
 export function removeSubscription(endpoint: string, userId?: string): Promise<void> {
   return getNotifier().then((notifier) => notifier.removeSubscription(endpoint, userId));
+}
+
+export function getPushProfileId(request: Request): string | null {
+  const config = getWebAuthConfig();
+  const identity = getWebRequestIdentity(request, config);
+  if ((config.mode === "users" || config.mode === "selection") && !identity) return null;
+  return identity?.id ?? GLOBAL_NOTIFICATION_PROFILE;
+}
+
+export async function reportPushPresence(
+  profileId: string,
+  clientId: string,
+  presence: NotificationPresence,
+): Promise<boolean> {
+  const notifier = await getNotifier();
+  return notifier.reportPresence(profileId, clientId, presence);
+}
+
+export async function removePushPresence(profileId: string, clientId: string): Promise<void> {
+  const notifier = await getNotifier();
+  notifier.removePresence(profileId, clientId);
 }
 
 export async function notifySessionComplete(sessionId: string): Promise<void> {

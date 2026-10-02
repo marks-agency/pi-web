@@ -518,8 +518,16 @@ test("suppresses sounds and browser attention for the active subagent session", 
   assert.match(chatWindowSource, /completionNotificationsEnabled = session\?\.relation\?\.kind !== "subagent"/);
   assert.match(chatWindowSource, /completionNotificationsEnabled && soundEnabledRef\.current/);
   assert.match(chatWindowSource, /!completionNotificationsEnabled[\s\S]*?!extensionDialog/);
-  assert.match(completionSource, /selectedSession\?\.relation\?\.kind === "subagent"\) return/);
+  assert.match(completionSource, /selectedSession\?\.relation\?\.kind === "subagent" \|\| !shouldShowBrowserNotification\(\)/);
   assert.match(attentionSource, /selectedSession\?\.relation\?\.kind === "subagent"\) return/);
+});
+
+test("reports per-profile presence and refreshes activity when a user returns", () => {
+  assert.match(appShellSource, /setInterval\(report, NOTIFICATION_HEARTBEAT_INTERVAL_MS\)/);
+  assert.match(appShellSource, /document\.visibilityState === "visible"\) notificationLastActivityAtRef\.current = Date\.now\(\)/);
+  assert.match(appShellSource, /window\.addEventListener\("focus", noteActivity\)/);
+  assert.match(appShellSource, /window\.addEventListener\("pointerdown", noteActivity/);
+  assert.match(appShellSource, /notificationPresenceRequestRef\.current \+= 1/);
 });
 
 test("routes blocking extension requests through deduplicated browser attention notifications", () => {
@@ -541,10 +549,14 @@ test("routes blocking extension requests through deduplicated browser attention 
     /isBlockingExtensionUiRequest\(request\)[\s\S]*?onAttentionNeeded\?\.\(request\)/,
   );
   assert.match(chatWindowSource, /onAttentionNeeded, onSessionCreated/);
-  assert.match(completionSource, /if \(!shouldShowBrowserNotification\(\)\) return/);
+  assert.match(completionSource, /selectedSession\?\.relation\?\.kind === "subagent" \|\| !shouldShowBrowserNotification\(\)/);
+  assert.match(completionSource, /reportNotificationPresence\(\)/);
+  assert.match(completionSource, /pushSubscriptionReadyRef\.current/);
   assert.doesNotMatch(completionSource, /pushActive/);
-  assert.match(completionSource, /tag: targetSession \? `pi-session-complete:\$\{targetSession\.id\}`/);
   assert.doesNotMatch(completionSource, /document\.visibilityState === "visible"/);
+  assert.match(appShellSource, /tag: targetSession \? `pi-session-complete:\$\{targetSession\.id\}`/);
+  assert.match(appShellSource, /createBrowserCompletionNotificationQueue/);
+  assert.match(appShellSource, /multipleSessionsComplete/);
   assert.match(attentionSource, /shouldShowBrowserNotification\(\)/);
   assert.match(attentionSource, /claimExtensionAttentionNotification\(request, notifiedAttentionRequestIdsRef\.current\)/);
   assert.match(attentionSource, /tag: `pi-extension-ui:\$\{request\.id\}`/);

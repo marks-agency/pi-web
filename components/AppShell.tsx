@@ -29,10 +29,16 @@ import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import {
   claimExtensionAttentionNotification,
+  createBrowserCompletionNotificationQueue,
   shouldShowBrowserNotification,
   showBrowserNotification,
+  type BrowserCompletionNotificationQueue,
 } from "@/lib/browser-notifications";
 import { setupPushSubscription } from "@/lib/push-client";
+import {
+  NOTIFICATION_COOLDOWN_MS,
+  NOTIFICATION_HEARTBEAT_INTERVAL_MS,
+} from "@/lib/notification-policy";
 import { getInitialNavigation, withTabOpen } from "@/lib/initial-navigation";
 import { clearTabOpenSession, getTabOpen, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
 import { mergeCatalogRow } from "./session-catalog-helpers";
@@ -70,6 +76,19 @@ type AutoNameStatus =
   | { kind: "success" }
   | { kind: "error"; message: string };
 
+interface LocalCompletionNotification {
+  targetSession: SessionInfo | null;
+  title: string;
+  body: string;
+  tag?: string;
+}
+
+interface LocalCompletionNotificationHandlers {
+  shouldDeliver: () => boolean;
+  deliver: (notification: LocalCompletionNotification) => void;
+  makeDigest: (notifications: readonly LocalCompletionNotification[]) => LocalCompletionNotification;
+}
+
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const AGENT_PANEL_WIDTH = 420;
 
@@ -87,14 +106,121 @@ export function AppShell() {
   const isMobile = useIsMobile();
   const isNarrowMobile = useIsNarrowMobile();
   useViewportHeight();
+  const notificationClientIdRef = useRef<string | null>(null);
+  const notificationLastActivityAtRef = useRef(0);
+  const notificationProfileEngagedRef = useRef(false);
+  const notificationPresenceRequestRef = useRef(0);
+  const pushSubscriptionReadyRef = useRef(false);
+  const pushSubscriptionPromiseRef = useRef<Promise<boolean> | null>(null);
+  const localCompletionQueueRef = useRef<BrowserCompletionNotificationQueue<LocalCompletionNotification> | null>(null);
+  const localCompletionHandlersRef = useRef<LocalCompletionNotificationHandlers>({
+    shouldDeliver: () => false,
+    deliver: () => {},
+    makeDigest: (notifications) => notifications[0] ?? { targetSession: null, title: "", body: "" },
+  });
+
+  const clearLocalCompletionQueue = useCallback(() => {
+    localCompletionQueueRef.current?.clear();
+  }, []);
+
+  const reportNotificationPresence = useCallback(async (): Promise<boolean | null> => {
+    const clientId = notificationClientIdRef.current;
+    if (!clientId) return null;
+    const requestId = ++notificationPresenceRequestRef.current;
+    try {
+      const response = await fetch("/api/push/presence", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientId,
+          visible: document.visibilityState === "visible",
+          focused: document.hasFocus(),
+          lastActivityAt: notificationLastActivityAtRef.current,
+        }),
+        keepalive: true,
+      });
+      if (!response.ok) return null;
+      const data = await response.json() as { engaged?: boolean };
+      if (requestId === notificationPresenceRequestRef.current) {
+        notificationProfileEngagedRef.current = data.engaged === true;
+        if (data.engaged) clearLocalCompletionQueue();
+      }
+      return data.engaged === true;
+    } catch {
+      return null;
+    }
+  }, [clearLocalCompletionQueue]);
+
+  // Report coarse per-profile presence so routine pushes can avoid interrupting
+  // an engaged Pi Web tab and coalesce completions while the profile is away.
+  useEffect(() => {
+    const clientId = window.crypto?.randomUUID?.()
+      ?? `piweb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    notificationClientIdRef.current = clientId;
+    notificationLastActivityAtRef.current = Date.now();
+    const report = () => { void reportNotificationPresence(); };
+    const noteActivity = () => {
+      notificationLastActivityAtRef.current = Date.now();
+      report();
+    };
+    const visibilityChanged = () => {
+      if (document.visibilityState === "visible") notificationLastActivityAtRef.current = Date.now();
+      report();
+    };
+    const removePresence = () => {
+      void fetch("/api/push/presence", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId }),
+        keepalive: true,
+      }).catch(() => {});
+    };
+
+    report();
+    const heartbeat = window.setInterval(report, NOTIFICATION_HEARTBEAT_INTERVAL_MS);
+    document.addEventListener("visibilitychange", visibilityChanged);
+    window.addEventListener("focus", noteActivity);
+    window.addEventListener("blur", report);
+    window.addEventListener("pointerdown", noteActivity, { passive: true });
+    window.addEventListener("keydown", noteActivity);
+    window.addEventListener("touchstart", noteActivity, { passive: true });
+    window.addEventListener("wheel", noteActivity, { passive: true });
+    return () => {
+      window.clearInterval(heartbeat);
+      document.removeEventListener("visibilitychange", visibilityChanged);
+      window.removeEventListener("focus", noteActivity);
+      window.removeEventListener("blur", report);
+      window.removeEventListener("pointerdown", noteActivity);
+      window.removeEventListener("keydown", noteActivity);
+      window.removeEventListener("touchstart", noteActivity);
+      window.removeEventListener("wheel", noteActivity);
+      removePresence();
+      notificationClientIdRef.current = null;
+      notificationPresenceRequestRef.current += 1;
+      notificationProfileEngagedRef.current = false;
+      clearLocalCompletionQueue();
+    };
+  }, [clearLocalCompletionQueue, reportNotificationPresence]);
 
   // Once the user has granted notification permission, register a Web Push
   // subscription so the server can notify backgrounded PWAs (notably iOS,
   // which suspends page JS and never receives the SSE completion event).
   useEffect(() => {
-    if (typeof window === "undefined" || !("Notification" in window)) return;
-    if (Notification.permission !== "granted") return;
-    void setupPushSubscription(locale);
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      pushSubscriptionReadyRef.current = false;
+      pushSubscriptionPromiseRef.current = null;
+      return;
+    }
+    if (Notification.permission !== "granted") {
+      pushSubscriptionReadyRef.current = false;
+      pushSubscriptionPromiseRef.current = null;
+      return;
+    }
+    const subscriptionPromise = setupPushSubscription(locale);
+    pushSubscriptionPromiseRef.current = subscriptionPromise;
+    void subscriptionPromise.then((ready) => {
+      pushSubscriptionReadyRef.current = ready;
+    });
   }, [locale]);
   // Audio ownership lives here (not in ChatWindow) so the completion tone can
   // also fire for tasks finishing in a non-active workspace whose ChatWindow
@@ -892,32 +1018,77 @@ export function AppShell() {
 
     if (Notification.permission === "granted") {
       fire();
-      void setupPushSubscription(locale);
+      const subscriptionPromise = setupPushSubscription(locale);
+      pushSubscriptionPromiseRef.current = subscriptionPromise;
+      void subscriptionPromise.then((ready) => {
+        pushSubscriptionReadyRef.current = ready;
+      });
     } else if (Notification.permission === "default") {
       void Notification.requestPermission().then((p) => {
         if (p === "granted") {
           fire();
-          void setupPushSubscription(locale);
+          const subscriptionPromise = setupPushSubscription(locale);
+          pushSubscriptionPromiseRef.current = subscriptionPromise;
+          void subscriptionPromise.then((ready) => {
+            pushSubscriptionReadyRef.current = ready;
+          });
         }
       });
     }
   }, [handleSelectSession, locale]);
+
+  localCompletionHandlersRef.current = {
+    shouldDeliver: () => !notificationProfileEngagedRef.current && shouldShowBrowserNotification(),
+    deliver: (notification) => deliverSessionNotification(notification),
+    makeDigest: (notifications) => ({
+      targetSession: null,
+      title: translate("i18n.multipleSessionsComplete", { count: notifications.length }),
+      body: translate("i18n.reviewCompletedSessions"),
+      tag: "pi-session-complete-digest:local",
+    }),
+  };
+  if (!localCompletionQueueRef.current) {
+    localCompletionQueueRef.current = createBrowserCompletionNotificationQueue({
+      shouldDeliver: () => localCompletionHandlersRef.current.shouldDeliver(),
+      deliver: (notification) => localCompletionHandlersRef.current.deliver(notification),
+      makeDigest: (notifications) => localCompletionHandlersRef.current.makeDigest(notifications),
+      cooldownMs: NOTIFICATION_COOLDOWN_MS,
+    });
+  }
+
+  const queueLocalCompletionNotification = useCallback((targetSession: SessionInfo | null) => {
+    const key = targetSession?.id ?? "no-selected-session";
+    localCompletionQueueRef.current?.enqueue(key, {
+      targetSession,
+      title: targetSession?.name ?? translate("i18n.sessionComplete"),
+      body: translate("i18n.taskFinished"),
+      tag: targetSession ? `pi-session-complete:${targetSession.id}` : "pi-session-complete",
+    });
+  }, [translate]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
     if (selectedSession) hydrateSelectedSession(selectedSession.id);
 
-    if (selectedSession?.relation?.kind === "subagent") return;
-    if (!shouldShowBrowserNotification()) return;
+    if (selectedSession?.relation?.kind === "subagent" || !shouldShowBrowserNotification()) return;
     const targetSession = selectedSession;
-    deliverSessionNotification({
-      targetSession,
-      title: targetSession?.name ?? translate("i18n.sessionComplete"),
-      body: translate("i18n.taskFinished"),
-      tag: targetSession ? `pi-session-complete:${targetSession.id}` : "pi-session-complete",
-    });
-  }, [deliverSessionNotification, hydrateSelectedSession, selectedSession, translate]);
+    void (async () => {
+      const engaged = await reportNotificationPresence();
+      if (engaged === true || notificationProfileEngagedRef.current) return;
+      let pushReady = pushSubscriptionReadyRef.current;
+      if (!pushReady && pushSubscriptionPromiseRef.current) {
+        try {
+          pushReady = await pushSubscriptionPromiseRef.current;
+          pushSubscriptionReadyRef.current = pushReady;
+        } catch {
+          pushReady = false;
+        }
+      }
+      if (pushReady) return;
+      queueLocalCompletionNotification(targetSession);
+    })();
+  }, [hydrateSelectedSession, queueLocalCompletionNotification, reportNotificationPresence, selectedSession]);
 
   const handleAttentionNeeded = useCallback((request: BlockingExtensionUiRequest) => {
     if (selectedSession?.relation?.kind === "subagent") return;

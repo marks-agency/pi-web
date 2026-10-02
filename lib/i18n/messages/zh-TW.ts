@@ -786,6 +786,8 @@ export const zhTWLocale: LocalePlugin = {
     "i18n.after": "變更後",
     "i18n.sessionComplete": "工作階段已完成",
     "i18n.taskFinished": "任務已完成。",
+    "i18n.multipleSessionsComplete": "{count} 個工作階段已完成",
+    "i18n.reviewCompletedSessions": "開啟 Pi Web 查看詳情。",
     "i18n.attentionNeeded": "Pi 需要你處理",
     "i18n.extensionInputNeeded": "擴充功能正在等待你的輸入。",
   },
