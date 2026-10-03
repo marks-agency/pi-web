@@ -125,6 +125,18 @@ npx @agegr/pi-web@latest
 - **File access boundary**: the file browser is limited to working directories selected in Pi Web and project or session roots it already knows about; it is not a general filesystem browser.
 - **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for switcher visibility, worktree creation, and removal behavior.
 
+### Team Sessions
+
+In local-user and profile-selection modes every session shows its owner in the sidebar, where a selector assigns or clears it. New sessions, forks, and clones belong to the profile that created them; older sessions stay unassigned until someone assigns them.
+
+Each profile can hide sessions it does not want to see. Hiding affects only that profile's sidebar and search, applies to the whole session family (a session and its subagents), and is reversible from the hidden-sessions view. Hidden sessions remain fully readable and editable by every profile; hiding is a personal filter, not a permission.
+
+Routine completion notifications are per profile. A profile that is actively using Pi Web receives none. While a profile is away, completions within a few minutes of the last alert are combined into one digest, delivered by Web Push where a subscription exists and by an in-page notification otherwise.
+
+### Agents Panel and pi-subagents
+
+The Agents panel, available from the top bar of any open session, lists the session's Pi Web subagents. When the session also runs the [pi-subagents](https://www.npmjs.com/package/pi-subagents) extension, the panel shows that extension's live runs and workflows beneath them, with elapsed time and the current tool. From there you can open a run's transcript tail, send a steering message to a running top-level run, or stop it. The controls appear only when the installed extension advertises them; a session without the extension shows the panel as unavailable.
+
 ### Downstream Session Context Menu
 
 Electron wrappers and other downstream integrations can provide a session-row
