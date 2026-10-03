@@ -1,3 +1,4 @@
+import "../../../lib/test-isolate-pi-web-env.mjs";
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
