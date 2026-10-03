@@ -1,6 +1,7 @@
 import { stat } from "fs/promises";
 import { resolve } from "path";
-import { createAgentSessionServices, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { createPiWebAgentSessionServices } from "@/lib/agent-session-services";
 import {
   isThinkingLevel,
   projectSettingsPath,
@@ -74,7 +75,9 @@ export async function PUT(req: Request) {
   try {
     const agentDir = getAgentDir();
     const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
-    const services = await createAgentSessionServices({
+    // Through the shim so a concurrent subagent start cannot leave the
+    // claude-bridge registration marker set while this fresh runtime loads.
+    const services = await createPiWebAgentSessionServices({
       cwd,
       agentDir,
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
