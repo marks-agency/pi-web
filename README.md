@@ -54,6 +54,7 @@ For port and hostname, command-line options override the corresponding environme
 | `PI_WEB_USERS_FILE` | Absolute path to a private local-users JSON file; mutually exclusive with `PI_WEB_PASSWORD` | Unset |
 | `PI_WEB_AUTH_MODE=selection` | Require profile selection without an application password; requires `PI_WEB_USERS_FILE` | Unset |
 | `PI_WEB_IDLE_TIMEOUT_MS` | Session idle timeout in milliseconds, up to `2147483647`; `0` disables idle shutdown; invalid or out-of-range values use the default | `600000` (10 min) |
+| `PI_WEB_SHUTDOWN_DEADLINE_MS` | How long extensions get to handle `session_shutdown` before a closing session is disposed anyway, in milliseconds up to `2147483647`; `0`, invalid or out-of-range values use the default | `5000` (5 s) |
 
 For example:
 
