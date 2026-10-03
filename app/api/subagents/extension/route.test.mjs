@@ -37,7 +37,7 @@ test("returns a bounded sanitized run snapshot from pi-subagents RPC", async (t)
     };
   });
 
-  const response = await GET(new Request("http://localhost/api/subagents/extension?sessionId=session-a"));
+  const response = await GET(new Request("http://localhost/api/subagents/extension?sessionId=session-a", { headers: { host: "localhost" } }));
   const body = await response.json();
   assert.equal(response.status, 200);
   assert.equal(body.available, true);
@@ -55,7 +55,7 @@ test("returns transcript text on an explicit run inspection", async (t) => {
     return { text: "run output\u001b[31m red" };
   });
 
-  const response = await GET(new Request("http://localhost/api/subagents/extension?sessionId=session-a&runId=run-1"));
+  const response = await GET(new Request("http://localhost/api/subagents/extension?sessionId=session-a&runId=run-1", { headers: { host: "localhost" } }));
   const body = await response.json();
   assert.equal(response.status, 200);
   assert.equal(body.transcript, "run output red");
@@ -70,7 +70,7 @@ test("validates and forwards steer and stop controls to the current session exte
   });
   const steerResponse = await POST(new Request("http://localhost/api/subagents/extension?sessionId=session-a", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { host: "localhost", "Content-Type": "application/json" },
     body: JSON.stringify({ action: "steer", runId: "run-1", message: " focus on tests " }),
   }));
   assert.equal(steerResponse.status, 200);
@@ -78,7 +78,7 @@ test("validates and forwards steer and stop controls to the current session exte
 
   const stopResponse = await POST(new Request("http://localhost/api/subagents/extension?sessionId=session-a", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { host: "localhost", "Content-Type": "application/json" },
     body: JSON.stringify({ action: "stop", runId: "run-1" }),
   }));
   assert.equal(stopResponse.status, 200);
@@ -89,7 +89,7 @@ test("rejects malformed controls and reports stale runs as conflicts", async (t)
   installBridge(t, async () => { throw Object.assign(new Error("run is no longer active"), { code: "invalid_state" }); });
   const send = (body) => POST(new Request("http://localhost/api/subagents/extension?sessionId=session-a", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { host: "localhost", "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }));
   assert.equal((await send({ action: "steer", runId: "run-1", message: " " })).status, 400);
@@ -100,11 +100,36 @@ test("rejects malformed controls and reports stale runs as conflicts", async (t)
 });
 
 test("requires a session id and treats an absent extension as unavailable", async (t) => {
-  const bad = await GET(new Request("http://localhost/api/subagents/extension"));
+  const bad = await GET(new Request("http://localhost/api/subagents/extension", { headers: { host: "localhost" } }));
   assert.equal(bad.status, 400);
 
   installBridge(t, async () => { throw new Error("pi-subagents did not respond"); });
-  const missing = await GET(new Request("http://localhost/api/subagents/extension?sessionId=session-a"));
+  const missing = await GET(new Request("http://localhost/api/subagents/extension?sessionId=session-a", { headers: { host: "localhost" } }));
   assert.equal(missing.status, 200);
   assert.equal((await missing.json()).available, false);
+});
+
+test("refuses untrusted hosts and non-JSON control bodies before touching the bridge", async (t) => {
+  let calls = 0;
+  installBridge(t, async () => { calls += 1; return {}; });
+
+  const foreignHost = await GET(new Request("http://localhost/api/subagents/extension?sessionId=session-a", {
+    headers: { host: "evil.example" },
+  }));
+  assert.equal(foreignHost.status, 403);
+
+  const crossSite = await POST(new Request("http://localhost/api/subagents/extension?sessionId=session-a", {
+    method: "POST",
+    headers: { host: "localhost", origin: "https://evil.example", "sec-fetch-site": "cross-site", "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "stop", runId: "run-1" }),
+  }));
+  assert.equal(crossSite.status, 403);
+
+  const formBody = await POST(new Request("http://localhost/api/subagents/extension?sessionId=session-a", {
+    method: "POST",
+    headers: { host: "localhost", "Content-Type": "text/plain" },
+    body: JSON.stringify({ action: "stop", runId: "run-1" }),
+  }));
+  assert.equal(formBody.status, 415);
+  assert.equal(calls, 0);
 });

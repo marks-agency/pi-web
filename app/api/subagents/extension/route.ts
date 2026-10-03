@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getPiSubagentsBridge } from "@/lib/pi-subagents-web-bridge";
+import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
 
@@ -93,6 +94,9 @@ function rpcErrorMessage(error: unknown): string {
 }
 
 export async function GET(request: Request) {
+  if (!isApiRequestAllowed(request)) {
+    return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  }
   const url = new URL(request.url);
   const sessionId = url.searchParams.get("sessionId")?.trim();
   if (!sessionId || sessionId.length > 4096) {
@@ -139,6 +143,12 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!isApiRequestAllowed(request)) {
+    return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  }
+  if (!hasJsonContentType(request)) {
+    return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
+  }
   const url = new URL(request.url);
   const sessionId = url.searchParams.get("sessionId")?.trim();
   if (!sessionId || sessionId.length > 4096) {
